@@ -6551,7 +6551,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'locale'],
       apply(ctx) {
         function BoardIcon({ size }) {
           const kante = size || 16;
