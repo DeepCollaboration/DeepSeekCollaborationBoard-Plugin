@@ -198,7 +198,7 @@ try {
 
   // 5. Ohne Konfiguration lädt das Modul weiter und stürzt nicht ab.
   cpSync(PRODUKT, ohneKopie, { recursive: true });
-  rmSync(join(ohneKopie, 'board.config.json'));
+  rmSync(join(ohneKopie, 'board.config.json'), { force: true });
   const ohne = ctxBauen();
   const modulOhne = await import(pathToFileURL(join(ohneKopie, 'index.js')).href);
   modulOhne.apply(ohne.ctx);
