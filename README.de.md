@@ -2,6 +2,9 @@
 
 **Deutsch** · [English](README.md) · [Español](README.es.md) · [Français](README.fr.md) · [Русский](README.ru.md) · [日本語](README.ja.md) · [العربية](README.ar.md) · [中文](README.zh.md)
 
+[![CI](https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Das Board ist eine öffentliche Werkstatt und ein privater Arbeitsplatz: Menschen
 legen Vorhaben an, arbeiten an ihnen und sehen, was die anderen tun. Es gibt
 keinen Dienst dazwischen, keine Datenbank und keine eigene Anmeldung. Der

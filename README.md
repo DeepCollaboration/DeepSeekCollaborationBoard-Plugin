@@ -2,6 +2,9 @@
 
 [Deutsch](README.de.md) · **English** · [Español](README.es.md) · [Français](README.fr.md) · [Русский](README.ru.md) · [日本語](README.ja.md) · [العربية](README.ar.md) · [中文](README.zh.md)
 
+[![CI](https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 The board is a public workshop and a private workspace at once: people create
 projects, work on them, and see what others are doing. There is no service in
 between, no database and no separate sign-in. The harness is the process, Git is
