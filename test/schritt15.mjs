@@ -16,9 +16,9 @@
  *      alte `basis` überholt: Speichern antwortet 409 mit dem neuen Text und
  *      der neuen `basis`, die Datei bleibt byte-gleich, es entsteht keine
  *      Fassung;
- *   4. der eigene Text lässt sich über `/board/beitrag` mit der neuen `basis`
- *      als Beitrag anlegen; der Beitrag liegt unter `beitraege/…`, die Datei
- *      im Vorhaben bleibt unverändert;
+ *   4. der alte Weg `/board/beitrag` ist entfernt: er antwortet 404, legt
+ *      keinen `beitraege/`-Ordner an und lässt die Datei im Vorhaben stehen;
+ *      der Beitrag geht als Pull Request über `/board/github/beitrag`;
  *   5. mit der neuen `basis` geht das Speichern durch; zwei Schreibvorgänge
  *      auf denselben Stand — der zweite mit der alten `basis` — antworten 409;
  *   6. eine vorhandene, gefasste Datei ohne `basis` wird nicht geschrieben:
@@ -26,7 +26,8 @@
  *      gefasste Datei darf ohne Basis angelegt werden;
  *   7. die Seite hält bei 409 den eigenen Text, nennt den neuen Stand und
  *      bietet ihn als Beitrag an;
- *   8. die echte Ablage bleibt ohne Prüfvorhaben, Beitrag und zweite Person.
+ *   8. die echte Ablage bleibt ohne Prüfvorhaben, alten Beitrag und zweite
+ *      Person.
  */
 import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
@@ -272,7 +273,13 @@ try {
 
   async function posting(pfad, koerper) {
     const res = antwort();
-    await route(pfad).handler(anfrage(pfad, koerper), res);
+    const r = gebaut.routen.get(String(pfad).split('?')[0]);
+    if (!r) {
+      res.status = 404;
+      res.text = JSON.stringify({ error: 'Nicht gefunden' });
+      return res;
+    }
+    await r.handler(anfrage(pfad, koerper), res);
     return res;
   }
 
@@ -364,34 +371,27 @@ try {
   console.log('ok 409: neuer Text „' + altWert.neu.text.split('\n')[2]
     + '“, neue Basis ' + basisExtern.slice(0, 7) + ', Datei byte-gleich');
 
-  // 8. Den eigenen Text mit der neuen Basis als Beitrag anlegen.
-  const beitragAntwort = alsJson(await posting('/board/beitrag', {
+  // 8. Der alte Weg zum Beitrag ist entfernt: er antwortet 404 und schreibt
+  //    nichts. Der eigene Text geht als Pull Request; die Datei im Vorhaben
+  //    bleibt unverändert.
+  const kopfVorAlt = git(['-C', ablage, 'log', '-1', '--format=%H']).out;
+  const resAlt = await posting('/board/beitrag', {
     vorhaben: 'eigenes-15',
     schritt: 'umsetzung',
     notiz: 'Mein Text zum überholten Stand.',
     dateien: [{ name: 'notiz.md', text: EIGENER }],
     basis: basisExtern,
-  }), '/board/beitrag');
-  const beitrag = beitragAntwort.beitrag;
-  pruefe(beitrag && beitrag.basis === basisExtern,
-    'Der Beitrag trägt nicht die neue Basis: ' + JSON.stringify(beitrag && beitrag.basis));
-  pruefe(Array.isArray(beitrag.dateien) && beitrag.dateien.length === 1,
-    'Der Beitrag trägt keine vorgeschlagene Fassung');
-  const beitragsDatei = String(beitrag.dateien[0].datei || '');
-  pruefe(/^beitraege\/eigenes-15\/[a-z0-9][a-z0-9-]*\/notiz\.md$/.test(beitragsDatei),
-    'Die vorgeschlagene Fassung liegt nicht unter beitraege/: ' + beitragsDatei);
-  pruefe(readFileSync(join(ablage, beitragsDatei), 'utf8') === EIGENER,
-    'Die vorgeschlagene Fassung trägt nicht den eigenen Text');
-  const beitragJson = liesJson(join(ablage, 'beitraege', 'eigenes-15', beitrag.id + '.json'));
-  pruefe(beitragJson.basis === basisExtern,
-    'Die Beitragsdatei trägt die neue Basis nicht');
+  });
+  pruefe(resAlt.status === 404,
+    'Der alte Beitragsweg antwortet ' + resAlt.status + ' statt 404: ' + resAlt.text);
+  pruefe(!existsSync(join(ablage, 'beitraege')),
+    'Der alte Beitragsweg hat einen beitraege/-Ordner angelegt');
   pruefe(Buffer.compare(bytesVor409, readFileSync(dateiPfad)) === 0,
-    'Der Beitrag hat die Datei im Vorhaben geändert');
-  const kopfBeitrag = git(['-C', ablage, 'log', '-1', '--format=%an%x1f%s']).out;
-  pruefe(/^Thomas Heinrich\x1f/.test(kopfBeitrag) && /Beitrag/.test(kopfBeitrag),
-    'Die Fassung des Beitrags heißt „' + kopfBeitrag + '“');
-  console.log('ok Beitrag: eigene Fassung unter ' + beitragsDatei
-    + ' mit der neuen Basis, die Datei unverändert');
+    'Der alte Beitragsweg hat die Datei im Vorhaben geändert');
+  pruefe(git(['-C', ablage, 'log', '-1', '--format=%H']).out === kopfVorAlt,
+    'Der alte Beitragsweg hat eine Fassung angelegt');
+  console.log('ok alter Beitragsweg: 404, kein beitraege/-Ordner, '
+    + 'Datei unverändert');
 
   // 9. Mit der neuen Basis geht das Speichern durch — obwohl inzwischen der
   //    Beitrag als Fassung dazukam; die Datei selbst hat sich nicht geändert.

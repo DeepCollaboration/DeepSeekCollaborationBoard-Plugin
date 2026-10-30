@@ -475,7 +475,7 @@ try {
     'Die Seite zeigt den Zielnamen des Rücksprungs nicht');
   pruefe(client.includes('r.grund'),
     'Die Seite zeigt den Grund des Rücksprungs nicht');
-  pruefe(client.includes("'↩ zurück nach „'"),
+  pruefe(client.includes("uebersetze('↩ zurück nach „{0}“: „{1}“',"),
     'Die Seite zeigt den Rücksprung nicht mit Ziel am Vorhaben');
   console.log('ok Seite: nur offene Rücksprünge, Ziel und Grund am Vorhaben');
 

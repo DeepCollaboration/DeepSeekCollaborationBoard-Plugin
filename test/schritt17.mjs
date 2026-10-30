@@ -15,8 +15,9 @@
  *   5. Zurückwechseln zeigt wieder die alte Ablage; die alte Personendatei
  *      wurde nicht überschrieben.
  *   6. Ein Board lässt sich aus der Liste nehmen; die Dateien bleiben.
- *   7. Ohne Board und ohne Konfiguration liefert `/board/data` `leer: true`;
- *      Identität und erstes Board entstehen aus der Seite heraus.
+ *   7. Ohne Board und ohne Konfiguration kommt das Hauptboard von selbst; ist
+ *      es nicht erreichbar, steht `fehler: 'nicht geholt'` da, und Identität
+ *      und erstes Board entstehen aus der Seite heraus.
  */
 import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
@@ -118,6 +119,7 @@ async function posting(gebaut, pfad, koerper) {
 
 let gebaut = null;
 let gebaut2 = null;
+let hauptboardVorher = null;
 
 try {
   cpSync(ABLAGE, ablage, { recursive: true });
@@ -198,14 +200,21 @@ try {
   pruefe(registerWeg.boards.length === 1, 'Das Board wurde nicht aus der Liste genommen');
   pruefe(existsSync(join(zweites.repo, 'format')), 'Die Dateien des entfernten Boards sind weg');
 
-  // 6. Frische Installation: kein Board, keine Konfiguration.
+  // 6. Frische Installation: kein Board, keine Konfiguration. Das Hauptboard
+  //    kommt von selbst; hier ist seine Adresse absichtlich unerreichbar.
   cpSync(PRODUKT, kopie2, { recursive: true });
   rmSync(join(kopie2, 'board.config.json'), { force: true });
   mkdirSync(home2, { recursive: true });
+  hauptboardVorher = process.env.DSH_BOARD_HAUPTBOARD;
+  process.env.DSH_BOARD_HAUPTBOARD = 'file://' + join(stamm, 'kein-hauptboard.git');
   gebaut2 = await starten(join(kopie2, 'index.js'), home2);
   const leer = get(gebaut2, '/board/data');
-  pruefe(leer.leer === true, 'Ohne Board ist die Antwort nicht leer');
-  pruefe(leer.boards.length === 0, 'Ohne Board gibt es schon Einträge');
+  pruefe(leer.leer === false, 'Das Hauptboard gilt als kein Board');
+  pruefe(leer.boards.length === 1 && leer.boards[0].id === 'hauptboard',
+    'Das Hauptboard steht nicht von selbst im Register: ' + JSON.stringify(leer.boards));
+  pruefe(leer.fehler === 'nicht geholt' && leer.boards[0].fehler === 'nicht geholt',
+    'Der ungeholte Erststart nennt seinen Grund nicht: '
+      + JSON.stringify({ fehler: leer.fehler, boards: leer.boards }));
   pruefe(leer.identitaet === null, 'Ohne Identität steht trotzdem eine da');
   const ohne = await posting(gebaut2, '/board/boards', {
     name: 'Erstes', adresse: '',
@@ -229,11 +238,14 @@ try {
   console.log('ok Neues Board: Format, Person, Start-Station, sofort offen');
   console.log('ok Wechsel: die alte Ablage und ihre Person bleiben, wie sie waren');
   console.log('ok Entfernen: nur die Liste verliert das Board, die Dateien bleiben');
-  console.log('ok Frische Installation: leer, Identität, erstes Board aus der Seite');
+  console.log('ok Frische Installation: Hauptboard nicht geholt, Identität, '
+    + 'erstes Board aus der Seite');
   console.log('ok Prüfordner aufgeräumt: ' + stamm);
 } finally {
   for (const b of [gebaut, gebaut2]) {
     if (b) b.aufraeumen.forEach((ende) => ende());
   }
+  if (hauptboardVorher == null) delete process.env.DSH_BOARD_HAUPTBOARD;
+  else process.env.DSH_BOARD_HAUPTBOARD = hauptboardVorher;
   rmSync(stamm, { recursive: true, force: true });
 }

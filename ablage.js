@@ -10,7 +10,7 @@
  * `board.json` kommt hier nicht vor: es wird weder gelesen noch geschrieben.
  */
 import {
-  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -367,76 +367,6 @@ export function liesBeitraege(repo) {
     }
   }
   return beitraege;
-}
-
-/** Eine vorgeschlagene Fassung ist ein flacher Name mit `.md` im Beitragsordner. */
-function beitragDateiname(wert) {
-  const name = String(wert == null ? '' : wert);
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(name) && !name.includes('..') ? name : '';
-}
-
-/**
- * Schreibt einen Beitrag: die Beschreibung als JSON, die vorgeschlagenen
- * Fassungen daneben im Ordner `<beitrag>/`. Die Originaldateien im Vorhaben
- * werden nicht angefasst — ein Beitrag ist eine eigene Datei, keine Änderung.
- */
-export function schreibeBeitrag(repo, beitrag, dateien) {
-  pruefeFormat(repo);
-  const vorhaben = String(beitrag.vorhaben || '');
-  if (!KENNUNG.test(vorhaben)) throw new Error('Ungültige Vorhaben-Kennung: ' + vorhaben);
-  const id = String(beitrag.id || '');
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) throw new Error('Ungültige Beitrags-Kennung: ' + id);
-
-  const eintraege = [];
-  const ort = join(repo, 'beitraege', vorhaben, id);
-  try {
-    for (const datei of Array.isArray(dateien) ? dateien : []) {
-      const name = beitragDateiname(datei && datei.name);
-      if (!name) {
-        throw new Error('Ungültiger Dateiname im Beitrag: ' + String(datei && datei.name));
-      }
-      mkdirSync(ort, { recursive: true });
-      const ziel = join(ort, name);
-      writeFileSync(ziel + '.tmp', String(datei.text == null ? '' : datei.text), 'utf8');
-      renameSync(ziel + '.tmp', ziel);
-      eintraege.push({ name, datei: 'beitraege/' + vorhaben + '/' + id + '/' + name });
-    }
-
-    const wert = { ...beitrag, dateien: eintraege };
-    schreibeJson(join(repo, 'beitraege', vorhaben, id + '.json'), wert);
-    return wert;
-  } catch (fehler) {
-    // Ganz oder gar nicht: ein halber Beitrag bleibt nicht liegen.
-    rmSync(ort, { recursive: true, force: true });
-    rmSync(join(repo, 'beitraege', vorhaben, id + '.json'), { force: true });
-    throw fehler;
-  }
-}
-
-/**
- * Trägt den Entscheid in die Beitragsdatei ein. Der Beitrag bleibt mit Notiz
- * und vorgeschlagenen Fassungen liegen; geändert wird nur sein Feld
- * `entschieden`. Geschrieben wird ganz oder gar nicht — eine halbe
- * Entscheidung gibt es nicht.
- */
-export function schreibeEntscheid(repo, vorhaben, id, entschieden) {
-  pruefeFormat(repo);
-  const kennung = String(vorhaben || '');
-  if (!KENNUNG.test(kennung) || kennung.includes('..')) {
-    throw new Error('Ungültige Vorhaben-Kennung: ' + kennung);
-  }
-  const beitragId = String(id || '');
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(beitragId)) {
-    throw new Error('Ungültige Beitrags-Kennung: ' + beitragId);
-  }
-  const pfad = join(repo, 'beitraege', kennung, beitragId + '.json');
-  const roh = liesJson(pfad, null);
-  if (!roh || typeof roh !== 'object' || Array.isArray(roh)) {
-    throw new Error('Diesen Beitrag gibt es nicht');
-  }
-  const wert = { ...roh, entschieden };
-  schreibeJson(pfad, wert);
-  return wert;
 }
 
 function liesSeitendatei(home, name, vorgabe) {

@@ -363,7 +363,7 @@ try {
     'Die fremde Fläche bietet das Anstellen nicht an');
   pruefe(client.includes("'Verweis herausnehmen'"),
     'Die eigene Fläche bietet das Herausnehmen des Verweises nicht an');
-  pruefe(client.includes("'bei ' + personName"),
+  pruefe(client.includes("uebersetze('bei {0}', [personName("),
     'Der Verweis nennt seinen Host nicht mit „bei ‹Person›“');
   console.log('ok Seite: anstellen, herausnehmen, „bei ‹Person›“');
 

@@ -2,6 +2,7 @@
   "name": "@local/dsh-board",
   "version": "0.1.0",
   "private": true,
+  "description": "CollaborationBoard — Stationen, Workflows und Vorhaben als gemeinsame Fläche im DeepSeek Harness.",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -13,9 +14,19 @@
     "index.js",
     "ablage.js",
     "boards.js",
+    "erststart.js",
+    "github.js",
+    "repos.js",
+    "komposition.js",
+    "katalog.js",
+    "rechte.js",
+    "abgleich.js",
+    "formate/*",
+    "werkzeuge/",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
+    "texte/*.json",
     "icon.svg"
   ],
   "dsh": {
@@ -29,5 +40,22 @@
         "@deepseek-ai/dsh-client-ui-layout"
       ]
     }
+  },
+  "license": "MIT",
+  "author": "Thomas Heinrich",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/issues"
+  },
+  "homepage": "https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin#readme",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.mjs",
+    "check": "node --check client.js && node --check index.js"
   }
 }

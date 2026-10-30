@@ -1,24 +1,23 @@
 /**
- * Prüfung Schritt 13 — Zweig und Fork tragen ihre Herkunft.
+ * Prüfung Schritt 13 — Zweig bleibt, der lokale Fork ist weg.
  *
  * Kopiert die Ablage und das Produkt nach /tmp. Die echte Ablage bekommt weder
- * eine zweite Person noch einen Fork noch den Prüfzweig. Im copy legt das
- * Skript ein eigenes Vorhaben zum Abzweigen an und ein fremdes Vorhaben `von-p2`
- * einer zweiten Person mit `idee.md` und einem Lauf.
+ * eine zweite Person noch einen lokalen Fork noch den Prüfzweig. Im copy legt
+ * das Skript ein eigenes Vorhaben zum Abzweigen an und ein fremdes Vorhaben
+ * `von-p2` einer zweiten Person mit `idee.md` und einem Lauf.
  *
  * Geprüft wird:
  *
  *   1. Abzweigen schreibt am neuen Vorhaben `zweig_von` mit Ursprung, Station
  *      und Datum; der Ursprung bleibt in Dateien, Station und Zeitstempel
  *      unverändert, der Zweig trägt seine Dateien;
- *   2. Forken legt auch für ein fremdes Vorhaben ein eigenes an: eigener
- *      Ordner mit den kopierten Dateien, `fork_von` auf den Ursprung, dessen
- *      Station und die eigene Person als Verantwortliche; die Läufe des
- *      Ursprungs kommen nicht mit; der fremde Ordner bleibt byte-gleich und
- *      wird nicht angefasst;
- *   3. `/board/data` nennt je Vorhaben die Herkunft samt Namen der Ursprünge;
- *   4. die Seite zeigt „Zweig von“ und „Fork von“ und macht die Herkunft nur
- *      bei sichtbarem Ursprung anklickbar (Quelltext, kein Browserbild);
+ *   2. der lokale Fork `/board/vorhaben/forken` ist entfernt: er antwortet 404,
+ *      legt kein Vorhaben und keine Fassung an; der fremde Ordner bleibt
+ *      byte-gleich und wird nicht angefasst;
+ *   3. `/board/data` nennt die Herkunft der vorhandenen Zweige;
+ *   4. die Seite zeigt „Zweig von“ und „Fork von“, macht die Herkunft nur bei
+ *      sichtbarem Ursprung anklickbar und forkt über `/board/github/fork`
+ *      (Quelltext, kein Browserbild);
  *   5. die zwei vorhandenen Zweige der echten Ablage bleiben unverändert.
  */
 import {
@@ -323,7 +322,13 @@ try {
 
   async function posting(pfad, koerper) {
     const res = antwort();
-    await route(pfad).handler(anfrage(pfad, koerper), res);
+    const r = gebaut.routen.get(pfad);
+    if (!r) {
+      res.status = 404;
+      res.text = JSON.stringify({ error: 'Nicht gefunden' });
+      return res;
+    }
+    await r.handler(anfrage(pfad, koerper), res);
     return res;
   }
 
@@ -425,35 +430,19 @@ try {
     + gezeigtZweig.herkunft.zweig.stationName + '“');
   console.log('ok /board/data (Zweig): Name und Station des Ursprungs stehen am Vorhaben');
 
-  // 6. Forken: das fremde Vorhaben wird als eigenes angelegt, der Ursprung
-  //    bleibt unangetastet.
-  const forkAntwort = alsJson(await posting('/board/vorhaben/forken', {
-    id: 'von-p2',
-  }), '/board/vorhaben/forken');
-  const forkId = String(forkAntwort.neu || '');
-  pruefe(!!forkId, 'Das Forken nennt keine neue Kennung');
-  const forkOrdner = join(ablage, 'vorgaenge', forkId);
-  pruefe(existsSync(join(forkOrdner, 'vorhaben.json')),
-    'Der Fork hat keine vorhaben.json');
-  const forkJson = liesJson(join(forkOrdner, 'vorhaben.json'));
-  pruefe(forkJson.fork_von === 'von-p2',
-    'Der Fork nennt „' + forkJson.fork_von + '“ statt von-p2');
-  pruefe(forkJson.zweig_von === null, 'Der Fork trägt ein zweig_von');
-  pruefe(forkJson.position === 'idee',
-    'Der Fork steht an „' + forkJson.position + '“ statt idee');
-  pruefe(JSON.stringify((forkJson.verantwortliche || {}).idee) === JSON.stringify(['p1']),
-    'Der Fork verantwortet nicht p1 an der Station: ' + JSON.stringify(forkJson.verantwortliche));
-  pruefe(Array.isArray(forkJson.laeufe) && forkJson.laeufe.length === 0,
-    'Der Fork trägt die Läufe des Ursprungs: ' + JSON.stringify(forkJson.laeufe));
-  pruefe(existsSync(join(forkOrdner, 'idee.md')),
-    'Dem Fork fehlt idee.md');
-  pruefe(Buffer.compare(readFileSync(join(fremdOrdner, 'idee.md')),
-    readFileSync(join(forkOrdner, 'idee.md'))) === 0,
-  'Der Fork trägt idee.md nicht byte-gleich');
-  pruefe(!existsSync(join(forkOrdner, 'transkripte')),
-    'Der Fork trägt die Transkripte des Ursprungs');
-
-  // Der Ursprung des Forks: byte-gleich und nicht einmal angefasst.
+  // 6. Der lokale Fork ist entfernt: 404, keine Kopie, keine Fassung. Der
+  //    fremde Ursprung wird dabei nicht angefasst.
+  const vorgaengeVorFork = readdirSync(join(ablage, 'vorgaenge')).sort();
+  const kopfVorFork = git(['-C', ablage, 'rev-parse', 'HEAD']).out;
+  const forkAntwort = await posting('/board/vorhaben/forken', { id: 'von-p2' });
+  pruefe(forkAntwort.status === 404, 'POST /board/vorhaben/forken antwortet '
+    + forkAntwort.status + ' statt 404: ' + forkAntwort.text);
+  pruefe(readdirSync(join(ablage, 'vorgaenge')).sort().join(',')
+    === vorgaengeVorFork.join(','),
+  'Der alte Fork hat ein Vorhaben angelegt: '
+    + readdirSync(join(ablage, 'vorgaenge')).join(', '));
+  pruefe(git(['-C', ablage, 'rev-parse', 'HEAD']).out === kopfVorFork,
+    'Der alte Fork hat eine Fassung angelegt');
   gleicherBaum(fremdBaumVorher, baum(fremdOrdner), 'Der fremde Ursprung');
   for (const [name, zeit] of fremdZeiten) {
     pruefe(mtime(join(fremdOrdner, name)) === zeit,
@@ -464,48 +453,41 @@ try {
   const fremdStatus = git(['-C', ablage, 'status', '--porcelain',
     '--', 'vorgaenge/von-p2', 'personen/p2.json']).out;
   pruefe(!fremdStatus, 'Git sieht Änderungen am fremden Ordner: ' + fremdStatus);
-  const forkFassung = git(['-C', ablage, 'log', '-1', '--format=%an %s']).out;
-  pruefe(/^Thomas Heinrich /.test(forkFassung) && /Fork/.test(forkFassung),
-    'Die Fassung des Forks heißt „' + forkFassung + '“');
-  console.log('ok Fork: eigenes Vorhaben mit fork_von, eigener Person, kopierten Dateien; '
-    + 'Läufe bleiben beim Ursprung');
+  console.log('ok alter Fork: 404, keine lokale Kopie, fremder Ursprung unberührt');
 
-  // 7. /board/data nennt auch beim Fork den Namen des Ursprungs.
+  // 7. /board/data erfindet keinen Fork; die Zahl der Vorhaben bleibt gleich.
   const nachFork = alsJson(get('/board/data'), '/board/data');
-  const gezeigtFork = nachFork.vorgaenge.find((v) => v.id === forkId);
-  pruefe(gezeigtFork && gezeigtFork.herkunft && gezeigtFork.herkunft.fork,
-    '/board/data trägt am Fork keine Herkunft');
-  pruefe(gezeigtFork.herkunft.fork.name === FREMDES.name,
-    '/board/data nennt am Fork „' + gezeigtFork.herkunft.fork.name
-      + '“ statt ' + FREMDES.name);
-  pruefe(gezeigtFork.herkunft.fork.sichtbar === true,
-    'Der Ursprung des Forks gilt in /board/data als nicht sichtbar');
-  pruefe(gezeigtFork.fork_von === 'von-p2',
-    '/board/data verliert am Fork das fork_von');
-  console.log('ok /board/data (Fork): Name des fremden Ursprungs steht am Fork');
+  pruefe(nachFork.vorgaenge.length === vorgaengeVorFork.length,
+    '/board/data zeigt nach dem alten Fork ' + nachFork.vorgaenge.length
+      + ' statt ' + vorgaengeVorFork.length + ' Vorhaben');
+  pruefe(!nachFork.vorgaenge.some((v) => v.fork_von === 'von-p2'),
+    '/board/data zeigt einen erfundenen lokalen Fork');
+  console.log('ok /board/data: kein lokaler Fork');
 
   // 8. Die Seite: „Zweig von“ und „Fork von“, die Herkunft nur bei sichtbarem
   //    Ursprung anklickbar; ein Forken an jedem Vorhaben.
   const client = readFileSync(join(kopie, 'client.js'), 'utf8');
-  pruefe(client.includes("'Zweig von '"),
+  pruefe(client.includes("uebersetze('Zweig von ')"),
     'Die Seite zeigt „Zweig von“ nicht');
-  pruefe(client.includes("'Fork von '"),
+  pruefe(client.includes("uebersetze('Fork von ')"),
     'Die Seite zeigt „Fork von“ nicht');
-  pruefe(client.includes("' ab '"),
+  pruefe(client.includes("uebersetze(' ab {0}',"),
     'Die Seite nennt die Station des Zweigs nicht');
   pruefe(client.includes('zweigHerkunft.sichtbar')
     && client.includes('forkHerkunft.sichtbar'),
   'Die Seite macht die Herkunft nicht vom sichtbaren Ursprung abhängig');
   pruefe(client.includes('herkunftOeffnen'),
     'Die Seite hat keinen Weg zum Ursprung');
-  pruefe(client.includes("'/board/vorhaben/forken'"),
-    'Die Seite spricht nicht mit /board/vorhaben/forken');
+  pruefe(!client.includes("'/board/vorhaben/forken'"),
+    'Die Seite ruft noch den lokalen Fork /board/vorhaben/forken auf');
+  pruefe(client.includes("fetch('/board/github/fork'"),
+    'Die Seite spricht nicht mit /board/github/fork');
   pruefe(client.includes('function forken'),
-    'Die Seite hat keine Fork-Handlung');
+    'Die Seite hat keine Fork-Handlung bei GitHub');
   pruefe(client.includes("'Forken'"),
     'Die Seite bietet „Forken“ nicht an');
-  console.log('ok Seite: „Zweig von“ und „Fork von“, Herkunft anklickbar, Forken an '
-    + 'jedem Vorhaben');
+  console.log('ok Seite: „Zweig von“ und „Fork von“, Herkunft anklickbar, '
+    + 'Forken über GitHub');
 
   // 9. Die echte Ablage bleibt ohne p2, ohne Fork und ohne den Prüfzweig; die
   //    zwei vorhandenen Zweige sind unverändert.

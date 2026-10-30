@@ -309,9 +309,9 @@ try {
   // 7. Die Seite: Anzeige und Handlung stehen im Client. Das Bild im Browser
   //    braucht einen Neustart und wird hier nicht geprüft.
   const client = readFileSync(join(kopie, 'client.js'), 'utf8');
-  pruefe(client.includes("'verantwortet von '"),
+  pruefe(client.includes("uebersetze('verantwortet von {0}',"),
     'Die Seite zeigt „verantwortet von“ nicht');
-  pruefe(client.includes("}, 'Weitergeben')"),
+  pruefe(client.includes("uebersetze('Weitergeben')"),
     'Die Seite hat die Handlung „Weitergeben“ nicht');
   pruefe(client.includes('darf.weitergeben'),
     'Die Seite richtet „Weitergeben“ nicht nach darf.weitergeben');

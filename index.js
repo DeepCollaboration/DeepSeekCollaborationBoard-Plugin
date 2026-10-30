@@ -1,48 +1,11 @@
 /**
  * Host-Hälfte des Board-Plugins.
  *
- * Routen:
- *   GET  /board/data          — Board mit abgeleiteten Feldern und dem Stand als JSON
- *   GET  /board/konfiguration — wer bin ich, wo liegt was { person, repo, remote, format }
- *   GET  /board/boards      — die Boards dieses Menschen und das offene
- *   POST /board/boards      — ein Board verbinden oder anlegen { name, adresse }
- *   POST /board/boards/wechsel — das offene Board wechseln { id }
- *   POST /board/boards/entfernen — aus der Liste nehmen { id }
- *   GET  /board/identitaet  — die eigene Identität { name, github, farbe }
- *   POST /board/identitaet  — die Identität setzen { name, github, farbe }
- *   POST /board/sync          — mit dem Remote abgleichen {} → { geholt, gegeben, lage }
- *   GET  /board/doc           — eine Datei ?vorhaben=<id>&datei=<name>
- *   POST /board/doc/schreiben — eine Datei speichern { vorhaben, datei, text, basis }
- *   POST /board/beitrag       — einen Beitrag anlegen { vorhaben, schritt, notiz, dateien }
- *   GET  /board/beitrag       — einen Beitrag lesen ?vorhaben=<id>&beitrag=<id>
- *   POST /board/beitrag/entscheiden — über einen Beitrag entscheiden { beitrag, art, teile? }
- *   GET  /board/dateien       — ?vorhaben=<id>&pfad=<pfad>, was in einem Ordner liegt
- *   GET  /board/datei         — ?vorhaben=<id>&pfad=<pfad>, eine Datei tief im Vorhaben
- *   POST /board/korrigieren   — Rechtschreibung korrigieren { text }
- *   POST /board/ueberarbeiten — einen Text nach einer Anweisung überarbeiten { text, anweisung }
- *   GET  /board/versionen     — ?vorhaben=<id>&datei=<name>, die Fassungen einer Datei
- *   GET  /board/version       — ?vorhaben=<id>&datei=<name>&hash=<id>, zwei Fassungen zum Vergleich
- *   GET  /board/verlauf       — ?vorhaben=<id>, die Schritte bis zur aktuellen Position
- *   POST /board/positions     — Position einfügen { schritt, x, y, nach? }
- *   POST /board/fremd/anstellen — einen fremden Schritt als Verweis in den eigenen Workflow stellen { ref, x?, y? }
- *   POST /board/fremd/entfernen — den Verweis samt seinen Positionen wieder herausnehmen { ref }
- *   POST /board/layout        — Anordnung der Fläche { modus: 'frei' | 'auto' }
- *   POST /board/einstellung   — eine Einstellung am Board { name, wert }
- *   POST /board/vorhaben      — Vorhaben anlegen { name }
- *   POST /board/vorhaben/aendern — Vorhaben umbenennen { id, name }
- *   POST /board/vorhaben/abzweigen — einen Zweig anlegen { id, station, ziel, name }
- *   POST /board/vorhaben/forken  — eine eigene Kopie eines Vorhabens anlegen { id, name? }
- *   GET  /board/skills        — die Anweisungen der Schritte aus der Ablage
- *   POST /board/skill/eintragen — eine Anweisung aus der Ablage an einer Station eintragen { schritt, skill }
- *   POST /board/skill/lauf    — Sitzung als Transkript zu einem Schritt festhalten
- *   GET  /board/transkript    — ?vorhaben=<id>&position=<id>, die Transkripte eines Schritts
- *   POST /board/gespraech/senden — Anweisung einsetzen, Sitzung anlegen (beim ersten Mal) und eine Nachricht schicken
- *   GET  /board/gespraech/stand  — ?vorhaben=<id>&position=<id>, das Gespräch eines Schritts
- *   POST /board/gespraech/stopp  — die Sitzung beenden und ihre Anweisung wegnehmen
- *   POST /board/werkstatt/senden — das Gespräch einer Station (ihr Skill entsteht darin)
- *   GET  /board/werkstatt/stand  — ?schritt=<id>, der Stand dieses Gesprächs
- *   POST /board/werkstatt/stopp  — den laufenden Zug abbrechen
- *   POST /board/werkstatt/verwerfen — die Sitzung ins Archiv legen
+ * Routen: die vollständige Liste steht in `docs/routen.md`. Hier nur die
+ * Gruppen — Fläche und Board, Workflow und Stationen, Vorhaben und Dateien,
+ * GitHub (Token, Beiträge, Fragen, Teams), Gespräch und Werkstatt, Sprache und
+ * Darstellung. Eine Liste im Kopf wurde bewusst entfernt: sie hielt mit den
+ * `registriere`-Aufrufen unten nicht Schritt. Maßgeblich ist der Code.
  *
  * Ein Vorhaben ist ein benannter Arbeitsgegenstand, der an genau einer
  * Position steht. Seine Dateien liegen in einem eigenen Ordner, damit zwei
@@ -58,16 +21,36 @@ import {
 } from 'node:fs';
 import { zstdDecompressSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
-import { join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  join, relative, resolve, sep, basename, dirname, isAbsolute,
+} from 'node:path';
 import {
   FORMAT, liesFormat, pruefeFormat,
-  liesAblage, schreibeAblage, liesBeitraege, schreibeBeitrag, schreibeEntscheid,
-  liesPersonen,
+  liesAblage, schreibeAblage, liesPersonen, liesWorkflows,
 } from './ablage.js';
 import {
-  HAUPTBOARD, ladeRegister, ladeIdentitaet, schreibeIdentitaet,
-  verbindeBoard, entferneBoard, schreibeRegister,
+  hauptboardAdresse, istHauptboard, ladeRegister, ladeIdentitaet, schreibeIdentitaet,
+  verbindeBoard, entferneBoard, kennzahlenVon, schreibeRegister, nimmBoardAuf,
+  AKZENTE, liesDarstellung, schreibeDarstellung,
 } from './boards.js';
+import { sicherstellen, wiederholen } from './erststart.js';
+import {
+  erstelleClient, liesToken, schreibeToken, loescheToken, liesLogin,
+} from './github.js';
+import { komponiere, liesStationAufFassung } from './komposition.js';
+import { sammleKatalog, sucheKatalog, stationZahlen } from './katalog.js';
+import { gleicheAlleAb, zusammenfassen } from './abgleich.js';
+import { liesBoard as liesBoardFassung2, schreibeBoard as schreibeBoardFassung2 } from './formate/board.js';
+import { liesStation } from './formate/station.js';
+import { liesWorkflow, schreibeFassung, schreibeWorkflow } from './formate/workflow.js';
+import { liesVorhaben, schreibeVorhaben } from './formate/vorhaben.js';
+import { cachePfad, liesRepo } from './repos.js';
+import {
+  ORGANISATION, darfSchreiben, schreibrecht, istVerantwortlich, pruefeVerweise,
+  sichtbarkeitVon, GRUND_OHNE_TOKEN, HINWEIS_OHNE_TOKEN, GRUND_NICHT_PRUEFBAR,
+  HINWEIS_NICHT_PRUEFBAR,
+} from './rechte.js';
 
 /**
  * Die Ablage und die eigene Person stehen in der Konfiguration des Plugins.
@@ -141,6 +124,15 @@ function autorMensch() {
   const person = eigenePerson();
   const name = String(person.name || '').trim() || person.id || 'Unbekannt';
   return [name, autorAdresse(name)];
+}
+
+/**
+ * Wer in ein Repository der Fassung 2 schreibt: die eigene Identität. Sie
+ * liegt außerhalb der Ablage; fehlt ihr Name, gilt der bisherige Weg.
+ */
+function autorFassung2() {
+  const name = String((IDENTITAET && IDENTITAET.name) || '').trim();
+  return name ? [name, autorAdresse(name)] : autorMensch();
 }
 
 /** Ein Modelllauf in ihrem Auftrag: „Modell (<Name>)“. */
@@ -244,12 +236,34 @@ function registerFuerSeite() {
     boards: REGISTER.boards.map((b) => ({
       id: b.id,
       name: b.name,
+      // Ein Archiv der Fassung 1 heißt „Archiv“; sein gespeicherter Name
+      // steht als `nameAlt` daneben. Die Seite erkennt daran den Lesemodus.
+      ...(b.archiv ? { archiv: true, nameAlt: b.nameAlt } : null),
       art: b.art,
+      format: b.format,
       remote: b.remote,
       person: b.person,
+      // Jedes Board trägt seine Sichtbarkeit; sie kommt aus seiner Umgebung.
+      // Das Hauptboard trägt sie im Register, weil sein Ordner fehlen kann.
+      sichtbarkeit: b.sichtbarkeit || sichtbarkeitVon(HOME, b.repo),
+      // Ein gescheiterter Erstversuch bleibt so lange sichtbar, bis er
+      // gelungen ist.
+      ...(b.fehler ? { fehler: b.fehler } : null),
       aktiv: b.id === REGISTER.aktiv,
     })),
   };
+}
+
+/**
+ * Das Hauptboard für den Katalog. Neben dem alten Board der Fassung 1 kann ein
+ * Eintrag mit derselben Art liegen; gemeint ist das Board der Fassung 2, nicht
+ * der ältere Eintrag mit der Kennung „hauptboard“.
+ */
+function hauptboardFuerKatalog() {
+  const boards = Array.isArray(REGISTER.boards) ? REGISTER.boards : [];
+  return boards.find((b) => b && b.art === 'hauptboard' && b.format === 2)
+    || boards.find((b) => b && b.id === 'hauptboard' && b.format === 2)
+    || null;
 }
 
 /**
@@ -377,12 +391,29 @@ function formatDerAblage() {
 }
 
 /**
+ * Ist das offene Board ein Archiv? Eine Ablage der Fassung 1 kann im Register
+ * `archiv: true` tragen. Dann bleibt sie lesbar; alle schreibenden Wege werden
+ * abgewiesen, bevor die Ablage angefasst wird. `BOARD_ARCHIV=1` erzwingt
+ * dasselbe für jede Fassung-1-Ablage, damit die Abweisung schon vor der
+ * Markierung des echten Archivs geprüft werden kann. Fassung 2 bleibt
+ * unberührt: ihr `archiv` gilt nicht.
+ */
+function istArchiv(board) {
+  if (!board || board.format !== 1) return false;
+  return board.archiv === true
+    || ['1', 'true', 'ja'].includes(String(process.env.BOARD_ARCHIV || '').toLowerCase());
+}
+
+/**
  * Die Prüfung vor jedem Schreiben: Das Programm kennt `FORMAT`; nennt die
  * Ablage eine andere Zahl, wird nichts geschrieben. Der Fehler trägt 409 und
  * den Text mit der Zahl der Ablage — die Route gibt ihn unverändert weiter.
  */
 function pruefeFormatVorSchreiben() {
   if (!REPO) return;
+  // Ein Board der Fassung 2 hat keine `format`-Datei: seine Fassung steht in
+  // jeder Formatdatei selbst und wird beim Lesen und beim Schreiben geprüft.
+  if (AKTIV && AKTIV.format === 2) return;
   pruefeFormat(REPO);
 }
 
@@ -423,11 +454,15 @@ function protokolliere(text, stufe, ms, lage, fehler) {
  * Die Versionierung: ein lokales Git-Repository, die Ablage. Jede Änderung
  * wird festgehalten, mit dem, der sie gemacht hat — er über das Board, das
  * Modell über seine Läufe. Nichts verlässt den Rechner.
+ *
+ * `ordner` ist das Repository, in dem der Befehl läuft; ohne Angabe die Ablage.
+ * Ein Vorhaben der Fassung 2 führt sein eigenes Repository.
  */
-function git(args, autor, grenzeMs) {
-  if (!REPO) return { ok: false, out: '', fehler: 'Keine Ablage konfiguriert' };
+function git(args, autor, grenzeMs, ordner) {
+  const ziel = ordner || REPO;
+  if (!ziel) return { ok: false, out: '', fehler: 'Keine Ablage konfiguriert' };
   const satz = [
-    '-C', REPO,
+    '-C', ziel,
     ...(autor ? ['-c', 'user.name=' + autor[0], '-c', 'user.email=' + autor[1]] : []),
     ...args,
   ];
@@ -815,6 +850,349 @@ function ordnerVon(vorgang) {
 }
 
 /**
+ * Das Board für die Lese-Routen: Fassung 1 kommt wie bisher aus der Ablage,
+ * Fassung 2 aus der Komposition über ihre Repositories.
+ */
+function boardFuerDateien() {
+  if (AKTIV && AKTIV.format === 2) {
+    return komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+  }
+  return liesBoard();
+}
+
+/**
+ * Der Ordner eines Vorhabens. In Fassung 1 ist das ein Name unter
+ * `vorgaenge/`, in Fassung 2 der absolute Pfad seines Repositories aus der
+ * Komposition. Fehlt der Verweis, bleibt der Ordner leer.
+ */
+function ordnerFuerVorgang(vorgang) {
+  if (AKTIV && AKTIV.format === 2) {
+    const ordner = String((vorgang && vorgang.ordner) || '').trim();
+    return ordner ? resolve(ordner) : '';
+  }
+  return ordnerVon(vorgang);
+}
+
+/**
+ * Das Repository, in dem die Dateien eines Vorhabens gefasst werden. In der
+ * alten Ablage ist das das Board-Repository; in Fassung 2 führt jedes Vorhaben
+ * sein eigenes.
+ */
+function repoFuerVorgang(ordner) {
+  return AKTIV && AKTIV.format === 2 ? ordner : REPO;
+}
+
+/**
+ * Ein lokaler Verweis aus einem Repository. Eine Adresse bleibt ohne Pfad:
+ * sie liegt nicht auf diesem Rechner. Ein leerer Verweis ebenso. Ein nackter
+ * Name meint den Geschwisterordner; `owner/name` wird über den
+ * Zwischenspeicher dieses Eigentümers aufgelöst — so liest eine Route auch
+ * den Verweis, den sie selbst als `owner/name` schreibt.
+ */
+function ortImRepo(verweis, basis) {
+  const text = String(verweis == null ? '' : verweis).trim();
+  if (!text || /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/i.test(text)) return '';
+  const direkt = resolve(basis, text);
+  if (existsSync(direkt)) return direkt;
+  if (!text.includes('/') && !text.includes('\\')) {
+    const neben = resolve(dirname(basis), text);
+    if (existsSync(neben)) return neben;
+  }
+  const teile = text.split('/');
+  if (teile.length === 2 && teile[0].trim() && teile[1].trim()) {
+    const zwischen = cachePfad(HOME, teile[0].trim(), teile[1].trim());
+    if (zwischen && existsSync(zwischen)) return zwischen;
+  }
+  return direkt;
+}
+
+/* --- Beiträge: das Repository hinter einem Ding ------------------------- */
+
+/** Ein GitHub-Remote oder eine GitHub-Adresse als `{ owner, name }`. */
+const GITHUB_REMOTE_MUSTER = /github\.com[:/]+([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i;
+/** Ein bloßes `owner/name`. */
+const REPO_KURZ_MUSTER = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;
+
+function githubAdresse(owner, name) {
+  return 'https://github.com/' + owner + '/' + name;
+}
+
+/**
+ * Liegt dieses Repository bei GitHub? Ein anderer Remote — eine Prüffläche,
+ * ein eigener Server — macht es nicht zu einem Repository mit Identität.
+ */
+function hatGithubRemote(pfad) {
+  const lauf = git(['remote', 'get-url', 'origin'], null, 5000, pfad);
+  return lauf.ok && GITHUB_REMOTE_MUSTER.test(String(lauf.out).trim());
+}
+
+/**
+ * Das GitHub-Repository hinter einem Verweis. Verstanden werden `owner/name`,
+ * eine GitHub-Adresse und ein lokaler Ordner mit GitHub-Remote. `pfad` steht
+ * nur da, wenn der Ordner hier liegt — er trägt das Schreibrecht.
+ */
+function githubZielAus(verweis) {
+  const text = String(verweis == null ? '' : verweis).trim();
+  if (!text) return { fehler: 'Das Repository fehlt' };
+  // Ein vorhandener Ordner hat Vorrang: sein Name kann wie `owner/name`
+  // aussehen, gemeint ist dann trotzdem der lokale Ort.
+  const direkt = resolve(text);
+  if (existsSync(direkt) && statSync(direkt).isDirectory()) {
+    const lauf = git(['remote', 'get-url', 'origin'], null, 5000, direkt);
+    const fern = lauf.ok ? String(lauf.out).trim() : '';
+    const treffer = fern.match(GITHUB_REMOTE_MUSTER);
+    if (!treffer) {
+      return { fehler: 'Dieses Repository hat keinen GitHub-Remote: ' + direkt };
+    }
+    return { owner: treffer[1], name: treffer[2], pfad: direkt };
+  }
+  const adresse = text.match(GITHUB_REMOTE_MUSTER);
+  if (adresse) return { owner: adresse[1], name: adresse[2], pfad: '' };
+  const kurz = text.match(REPO_KURZ_MUSTER);
+  if (kurz) return { owner: kurz[1], name: kurz[2], pfad: '' };
+  return { fehler: 'Bitte das Repository als owner/name angeben' };
+}
+
+/**
+ * Der Verweis, den ein neues Schreiben für ein lokales Repository einträgt:
+ * `owner/name`, wenn ein GitHub-Remote vorhanden ist; sonst der Ordnername.
+ * Ein absoluter Pfad wird so nie geschrieben, und ein Eigentümer wird nicht
+ * erfunden — ohne Remote gibt es keine Adresse, die auf einem anderen Rechner
+ * gälte.
+ */
+function verweisFuerRepo(pfad) {
+  const text = String(pfad == null ? '' : pfad).trim();
+  if (!text) return '';
+  const ziel = githubZielAus(text);
+  if (ziel && ziel.owner && ziel.name) return ziel.owner + '/' + ziel.name;
+  return basename(resolve(text));
+}
+
+/**
+ * Die Repositories des offenen Boards mit ihrem GitHub-Ziel. Nur diese
+ * dürfen beschrieben werden: das Board nennt sie in `board.json`, in einem
+ * Workflow oder in einem Vorhaben. Ein lokaler Ordner allein sagt nichts
+ * über seine Zugehörigkeit — auch nicht, wenn sein Remote passt.
+ */
+function boardRepos() {
+  if (!REPO || !AKTIV || AKTIV.format !== 2) return [];
+  let board;
+  try {
+    board = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+  } catch {
+    return [];
+  }
+  const liste = [];
+  for (const stand of (Array.isArray(board.staende) ? board.staende : [])) {
+    const pfad = String((stand && stand.pfad) || '');
+    if (!pfad || !existsSync(pfad)) continue;
+    const lauf = git(['remote', 'get-url', 'origin'], null, 5000, pfad);
+    const treffer = lauf.ok ? String(lauf.out).trim().match(GITHUB_REMOTE_MUSTER) : null;
+    if (!treffer) continue;
+    liste.push({ pfad: resolve(pfad), owner: treffer[1], name: treffer[2] });
+  }
+  return liste;
+}
+
+/**
+ * Der Ordner im offenen Board zu einem Verweis. Nennt das Board das
+ * Repository nicht, bleibt das Ergebnis leer — und die Route schreibt nicht.
+ * Ein genannter Ordner zählt nur an seinem eigenen Pfad, nicht als Kopie.
+ */
+function boardPfadFuer(ziel) {
+  const alle = boardRepos();
+  if (ziel && ziel.pfad) {
+    const ort = resolve(ziel.pfad);
+    const treffer = alle.find((eintrag) => eintrag.pfad === ort);
+    return treffer ? treffer.pfad : '';
+  }
+  if (!ziel || !ziel.owner || !ziel.name) return '';
+  const gesucht = (ziel.owner + '/' + ziel.name).toLowerCase();
+  const treffer = alle.find(
+    (eintrag) => (eintrag.owner + '/' + eintrag.name).toLowerCase() === gesucht,
+  );
+  return treffer ? treffer.pfad : '';
+}
+
+/** Die erste Zeile einer Meldung — die Antwort soll kurz bleiben. */
+function kurzZeile(fehler) {
+  return String((fehler && fehler.message) || fehler).split('\n')[0].trim();
+}
+
+/**
+ * Die Fassung eines Repositories: sein letzter Tag, sonst der Stand von HEAD.
+ * Eine Station ohne Fassung bekommt keinen erfundenen Namen; die Route weist
+ * sie ab, bevor sie den Workflow schreibt. Für einen Workflow gilt dasselbe:
+ * der letzte Tag oder HEAD wird zu seiner festen Fassung im Board.
+ */
+function fassungDesRepos(ordner) {
+  const tag = git(['describe', '--tags', '--abbrev=0'], null, undefined, ordner);
+  if (tag.ok && tag.out.trim()) return tag.out.trim();
+  const kopf = git(['rev-parse', 'HEAD'], null, undefined, ordner);
+  return kopf.ok ? kopf.out.trim() : '';
+}
+
+/** Trägt diese Fassung eine `station.json`? Nur dann ist sie für den Workflow eine. */
+function fassungMitStation(ordner, fassung) {
+  const wert = String(fassung == null ? '' : fassung).trim();
+  if (!wert || wert.startsWith('-')) return false;
+  return git(['rev-parse', '--verify', '--quiet', wert + ':station.json'],
+    null, 5000, ordner).ok;
+}
+
+/**
+ * Die Fassung einer Station, die ein Workflow fortschreibt: der letzte Tag,
+ * wenn er eine `station.json` trägt; sonst der kurze HEAD. Der volle
+ * 40-Zeichen-Hash wird nie geschrieben — ein Tag wird nicht erfunden.
+ */
+function fassungZumFestschreiben(ordner) {
+  const tag = git(['describe', '--tags', '--abbrev=0'], null, undefined, ordner);
+  const fassung = tag.ok ? tag.out.trim() : '';
+  if (fassung && fassungMitStation(ordner, fassung)) return fassung;
+  const kopf = git(['rev-parse', '--short', 'HEAD'], null, undefined, ordner);
+  return kopf.ok ? kopf.out.trim() : '';
+}
+
+/**
+ * Die Fassung, die ein Nachziehen nimmt, wenn keine genannt ist: der neueste
+ * Tag, wenn er eine `station.json` trägt; sonst der kurze HEAD. Ein Tag wird
+ * nicht erfunden — steht in der Station nichts, was als Fassung taugt, bleibt
+ * das Ergebnis leer.
+ */
+function fassungFuerStation(ordner) {
+  const tag = git(['describe', '--tags', '--abbrev=0'], null, undefined, ordner);
+  const kandidat = tag.ok ? tag.out.trim() : '';
+  if (kandidat && fassungMitStation(ordner, kandidat)) return kandidat;
+  const kopf = git(['rev-parse', '--short', 'HEAD'], null, undefined, ordner);
+  return kopf.ok ? kopf.out.trim() : '';
+}
+
+/**
+ * Der neueste Tag, wenn er hinter der eingetragenen Fassung liegt; sonst
+ * leer. Nur dann bietet die Seite „Fassung nachziehen“ an — ein Tag auf einem
+ * anderen Zweig ist nicht neuer, sondern ein anderer.
+ */
+function neuereFassung(ordner, eingetragen) {
+  const alt = String(eingetragen == null ? '' : eingetragen).trim();
+  if (!alt || alt.startsWith('-')) return '';
+  const tag = git(['describe', '--tags', '--abbrev=0'], null, undefined, ordner);
+  const neuester = tag.ok ? tag.out.trim() : '';
+  if (!neuester || neuester === alt) return '';
+  if (!fassungMitStation(ordner, neuester)) return '';
+  if (!git(['rev-parse', '--verify', '--quiet', alt + '^{commit}'],
+    null, undefined, ordner).ok) {
+    // Die eingetragene Fassung gibt es nicht: der neueste Tag ist der Weg
+    // zurück auf einen Stand, den das Repository kennt.
+    return neuester;
+  }
+  if (!git(['merge-base', '--is-ancestor', alt, neuester], null, undefined, ordner).ok) {
+    return '';
+  }
+  return neuester;
+}
+
+/**
+ * Das Vertrauensbild einer Station: was in ihrem Repository steht, welche
+ * Fassung gilt und welche Workflows des Boards sie nennen. Sterne, Releases,
+ * Fragen und Beiträge kommen aus dem Katalog-Zwischenspeicher und von GitHub;
+ * sie werden in der Route ergänzt.
+ */
+function stationBild(board, boardOrt, ort, station) {
+  // Ohne README bleibt `readme` null; die Seite sagt dann „kein README“.
+  let readme = null;
+  try {
+    readme = readFileSync(join(ort, 'README.md'), 'utf8');
+  } catch {
+    /* kein README */
+  }
+
+  // Die Beispiele: die Dateien unter `examples/` und `beispiele/`, dazu die
+  // Namen aus `station.json`, die noch nicht als Datei dastehen.
+  const beispiele = [];
+  for (const ordnerName of ['examples', 'beispiele']) {
+    try {
+      const dateien = readdirSync(join(ort, ordnerName), { withFileTypes: true })
+        .filter((eintrag) => eintrag.isFile())
+        .map((eintrag) => eintrag.name)
+        .sort((a, b) => a.localeCompare(b, 'de'));
+      for (const name of dateien) {
+        if (!beispiele.includes(name)) beispiele.push(name);
+      }
+    } catch {
+      /* kein solcher Ordner */
+    }
+  }
+  for (const eintrag of station.beispiele) {
+    const name = typeof eintrag === 'string'
+      ? eintrag.trim()
+      : (eintrag && typeof eintrag === 'object'
+        ? String(eintrag.name || eintrag.datei || '').trim()
+        : '');
+    if (name && !beispiele.includes(name)) beispiele.push(name);
+  }
+
+  // Die Verwendung: jeder Workflow des Boards, der auf dieses Repository
+  // verweist — mit Titel und der Fassung, die dort festgelegt ist.
+  const verwendung = [];
+  let fassung = '';
+  for (const verweis of board.workflows) {
+    const workflowOrt = ortImRepo(verweis.repo, boardOrt);
+    if (!workflowOrt) continue;
+    let workflow;
+    try {
+      workflow = liesWorkflow(workflowOrt);
+    } catch {
+      continue;
+    }
+    const treffer = workflow.stationen.find(
+      (eintrag) => ortImRepo(eintrag.repo, workflowOrt) === ort,
+    );
+    if (!treffer) continue;
+    verwendung.push({
+      id: workflow.id,
+      titel: workflow.titel,
+      fassung: treffer.fassung,
+      repo: workflowOrt,
+    });
+    if (!fassung) fassung = treffer.fassung;
+  }
+  // Ohne Workflow-Verweis gilt der letzte Tag, sonst der Stand von HEAD.
+  if (!fassung) fassung = fassungDesRepos(ort);
+
+  // Gezeigt wird die Station so, wie sie auf der genannten Fassung steht —
+  // dieselben Regeln wie in der Komposition. Fehlt die Fassung oder ihre
+  // `station.json`, gilt der aktuelle Stand; `fassungFehlt` sagt es.
+  let gezeigt = station;
+  let fassungFehlt = false;
+  if (fassung) {
+    const aufFassung = liesStationAufFassung(ort, fassung);
+    if (aufFassung.station) gezeigt = aufFassung.station;
+    else fassungFehlt = true;
+  }
+
+  return {
+    format: 2,
+    id: gezeigt.id,
+    name: gezeigt.name,
+    beschreibung: gezeigt.beschreibung || null,
+    host: gezeigt.host,
+    aktion: { ...gezeigt.aktion },
+    reife: gezeigt.reife,
+    lizenz: gezeigt.lizenz,
+    tags: gezeigt.tags,
+    fassung: fassung || null,
+    fassungFehlt,
+    // Ein neuerer Tag als die eingetragene Fassung: erst dann lässt sie sich
+    // nachziehen. Sonst bleibt der Knopf weg.
+    nachziehen: fassung ? (neuereFassung(ort, fassung) || null) : null,
+    beispiele,
+    verwendung,
+    repo: ort,
+    readme,
+  };
+}
+
+/**
  * Was an einer Stelle liegt: der Text einer Datei oder — bei einem Namen mit
  * Schrägstrich am Ende — der Ordner mit der Zahl seiner Einträge. Ein Ordner
  * ist ein Ergebnis wie eine Datei; sein Inhalt steht erst fest, wenn er da ist.
@@ -842,12 +1220,14 @@ function dateiInhalt(ordner, name) {
  * zuletzt berührt hat. `null` heißt: die Datei ist noch nicht gefasst — sie
  * liegt unversioniert da oder gibt es noch nicht. Ein Commit anderswo im
  * Repository ändert die Basis nicht; nur eine Änderung an dieser Datei tut es.
+ * `repo` ist das Repository, in dem gefasst wird: ohne Angabe die Ablage, in
+ * Fassung 2 das eigene Repository des Vorhabens.
  */
-function dateiBasis(ordner, name) {
-  if (!REPO || !ordner || String(name).endsWith('/')) return null;
-  const pfad = relative(REPO, join(ordner, name)).split(sep).join('/');
+function dateiBasis(ordner, name, repo = REPO) {
+  if (!repo || !ordner || String(name).endsWith('/')) return null;
+  const pfad = relative(repo, join(ordner, name)).split(sep).join('/');
   if (!pfad || pfad.startsWith('../')) return null;
-  const log = git(['log', '-1', '--format=%H', '--', pfad]);
+  const log = git(['log', '-1', '--format=%H', '--', pfad], null, undefined, repo);
   const hash = log.ok ? log.out.trim() : '';
   return /^[0-9a-f]{40}$/.test(hash) ? hash : null;
 }
@@ -875,6 +1255,33 @@ function pfadImOrdner(ordner, pfad) {
   const ziel = resolve(ordner, ...teile);
   if (ziel !== ordner && !ziel.startsWith(ordner + sep)) return null;
   return ziel;
+}
+
+/**
+ * Eine Datei im Vorhaben: der Name, den `dateiName` aus der Eingabe macht, und
+ * der aufgelöste Pfad. Ein absoluter Pfad, ein `..` im Weg oder ein Ausbruch
+ * aus dem Ordner ist ein Fehler — auch dann, wenn `dateiName` daraus einen
+ * harmlosen Namen machen würde. Ein Ordner ist keine Datei.
+ * Zurück kommt `{ name, ziel }` oder `{ fehler }`.
+ */
+function dateiImVorhaben(ordner, eingabe) {
+  const roh = String(eingabe == null ? '' : eingabe).trim();
+  const teile = roh.split(/[\\/]/);
+  if (!roh || roh.startsWith('/') || roh.startsWith('\\')
+    || /^[A-Za-z]:/.test(roh) || teile.includes('..')) {
+    return { fehler: 'Ungültiger Dateiname' };
+  }
+  const name = dateiName(roh);
+  if (!name) return { fehler: 'Ungültiger Dateiname' };
+  if (name.endsWith('/')) return { fehler: 'Ein Ordner ist keine Datei' };
+  const ziel = pfadImOrdner(ordner, name);
+  if (!ziel) return { fehler: 'Ungültiger Dateiname' };
+  try {
+    if (statSync(ziel).isDirectory()) return { fehler: 'Ein Ordner ist keine Datei' };
+  } catch {
+    /* Die Datei gibt es noch nicht — das ist der Normalfall beim Anlegen. */
+  }
+  return { name, ziel };
 }
 
 /**
@@ -917,6 +1324,75 @@ function kopiereOrdner(von, nach, masse, auslassen) {
     }
   }
   return zaehler;
+}
+
+/**
+ * Wo ein Verweis eines Repositories liegt: ein Pfad relativ zu seinem Ordner,
+ * ein nackter Name zuerst als Geschwisterordner. Eine Adresse bleibt leer.
+ */
+function lokalerOrt(verweis, basis) {
+  const text = String(verweis == null ? '' : verweis).trim();
+  if (!text || /^(https?:\/\/|git@|ssh:\/\/|git:\/\/|file:\/\/)/i.test(text)) return '';
+  const direkt = resolve(basis, text);
+  if (existsSync(direkt)) return direkt;
+  if (!text.includes('/') && !text.includes('\\')) {
+    const neben = resolve(dirname(basis), text);
+    if (existsSync(neben)) return neben;
+  }
+  return direkt;
+}
+
+/** Ein neues Repository anlegen und seinen ganzen Inhalt festschreiben. */
+function legeRepoAn(ordner, nachricht, autor) {
+  const init = git(['init', '-b', 'main'], null, 20000, ordner);
+  if (!init.ok) {
+    throw fehlerMit('Das Repository ließ sich nicht anlegen: '
+      + kurzZeile(init.fehler), 500);
+  }
+  const add = git(['add', '-A'], null, 20000, ordner);
+  if (!add.ok) {
+    throw fehlerMit('Die Dateien ließen sich nicht aufnehmen: '
+      + kurzZeile(add.fehler), 500);
+  }
+  const commit = git(['commit', '-m', nachricht], autor, 20000, ordner);
+  if (!commit.ok) {
+    throw fehlerMit('Die Fassung ließ sich nicht festschreiben: '
+      + kurzZeile(commit.fehler), 500);
+  }
+}
+
+/** Eine freie Kennung für ein neues Board unter den Ablagen. */
+function freieBoardKennung(name) {
+  const basis = slug(name) || 'board';
+  const besetzt = new Set((REGISTER.boards || []).map((b) => b.id));
+  let id = basis;
+  let nummer = 2;
+  while (besetzt.has(id) || existsSync(join(HOME, 'board', 'ablagen', id))) {
+    id = basis + '-' + nummer;
+    nummer += 1;
+  }
+  return id;
+}
+
+/** Das Probeprojekt des Hauptboards, wenn keines genannt ist. */
+function probeprojektDesHauptboards() {
+  const haupt = hauptboardFuerKatalog();
+  if (!haupt) return null;
+  let board;
+  try {
+    board = liesBoardFassung2(haupt.repo);
+  } catch {
+    return null;
+  }
+  for (const verweis of board.vorhaben) {
+    const ort = lokalerOrt(verweis.repo, haupt.repo);
+    if (!ort || !existsSync(join(ort, 'vorhaben.json'))) continue;
+    if (basename(ort) === 'vorhaben-probeprojekt') return ort;
+    try {
+      if (liesVorhaben(ort).id === 'probeprojekt') return ort;
+    } catch { /* der nächste Verweis */ }
+  }
+  return null;
 }
 
 /**
@@ -1448,6 +1924,124 @@ function verantwortetVon(vorhaben, personen) {
   return namen.join(', ');
 }
 
+/* --- Teams ---------------------------------------------------------------- */
+
+/** Das kurze Gedächtnis der Teams, wie beim Katalog: zehn Minuten je Organisation. */
+const TEAM_ZWISCHENSPEICHER = new Map();
+
+function teamCacheTtl() {
+  const text = String(process.env.DSH_BOARD_CACHE_TTL || '').trim();
+  if (!text) return 10 * 60 * 1000;
+  const zahl = Number(text);
+  return Number.isFinite(zahl) && zahl >= 0 ? zahl : 10 * 60 * 1000;
+}
+
+/**
+ * Die Teams einer Organisation mit ihren Mitgliedern. Ohne Token gibt es
+ * keine Teams: `{kann:false, hinweis:'Teams nur mit Token'}`. Mit Token wird
+ * je Team die Mitgliederliste geholt; das Ergebnis gilt zehn Minuten,
+ * `DSH_BOARD_CACHE_TTL` überschreibt die Zeit, `frisch` umgeht sie. Ist
+ * GitHub nicht erreichbar, kommt der letzte Stand mit einem Hinweis.
+ */
+async function holeTeams(org = ORGANISATION, { frisch = false } = {}) {
+  const ziel = String(org == null ? '' : org).trim() || ORGANISATION;
+  const token = liesToken(HOME);
+  if (!token) {
+    return { kann: false, teams: [], hinweis: 'Teams nur mit Token' };
+  }
+  const jetzt = Date.now();
+  const treffer = TEAM_ZWISCHENSPEICHER.get(ziel) || null;
+  if (!frisch && treffer && jetzt - treffer.am < teamCacheTtl()) {
+    return { kann: true, teams: treffer.teams, hinweis: '' };
+  }
+
+  const client = erstelleClient({ home: HOME, token });
+  try {
+    const roh = await client.teams(ziel, { frisch });
+    const teams = [];
+    for (const team of roh) {
+      let mitglieder = [];
+      try {
+        mitglieder = (await client.teamMitglieder(ziel, team.slug, { frisch }))
+          .map((eintrag) => String((eintrag && eintrag.login) || ''))
+          .filter(Boolean);
+      } catch {
+        // Ein Team, dessen Mitglieder nicht lesbar sind, bleibt ohne sie.
+      }
+      teams.push({
+        name: team.name || team.slug,
+        // Der Schlüssel heißt bei GitHub `slug`; die Seite liest `schluessel`,
+        // `key` bleibt für ältere Aufrufer stehen.
+        key: team.slug,
+        schluessel: team.slug,
+        beschreibung: team.beschreibung || '',
+        sichtbarkeit: team.sichtbarkeit || '',
+        mitglieder,
+      });
+    }
+    TEAM_ZWISCHENSPEICHER.set(ziel, { am: jetzt, teams });
+    return { kann: true, teams, hinweis: '' };
+  } catch (fehler) {
+    if (treffer) {
+      return {
+        kann: true,
+        teams: treffer.teams,
+        hinweis: 'GitHub nicht erreichbar; letzter Stand',
+      };
+    }
+    return {
+      kann: true,
+      teams: [],
+      hinweis: 'Teams nicht gelesen: ' + kurzZeile(fehler),
+    };
+  }
+}
+
+/**
+ * Verantwortet die eigene Identität das Vorhaben an dieser Stelle? Zuerst
+ * entscheidet die Eintragung, dann — nur mit Remote — das Team. Die Teams
+ * werden erst geholt, wenn die Eintragung nicht reicht.
+ */
+async function verantwortetVorhaben(vorgang, position, ordner) {
+  const lokal = !hatGithubRemote(ordner);
+  const basis = {
+    vorhaben: vorgang,
+    position: String(position == null ? '' : position),
+    identitaet: IDENTITAET,
+    teams: null,
+    org: ORGANISATION,
+    lokal,
+  };
+  if (istVerantwortlich(basis)) return true;
+  if (lokal) return false;
+  const geholt = await holeTeams(ORGANISATION);
+  return istVerantwortlich({ ...basis, teams: geholt.teams });
+}
+
+/**
+ * Darf die eigene Identität diese Station in den Workflow stellen? Host der
+ * Station, Autor des Workflows oder — nur mit Remote — das Team `workflows`.
+ */
+async function verantwortetStation({ station, workflow, lokal }) {
+  const stelle = String((station && station.id) || 'station');
+  const liste = [station && station.host, workflow && workflow.autor]
+    .map((eintrag) => String(eintrag == null ? '' : eintrag).trim())
+    .filter(Boolean);
+  const basis = {
+    vorhaben: { verantwortliche: { [stelle]: liste } },
+    position: stelle,
+    identitaet: IDENTITAET,
+    teams: null,
+    org: ORGANISATION,
+    lokal: Boolean(lokal),
+    art: 'workflow',
+  };
+  if (istVerantwortlich(basis)) return true;
+  if (basis.lokal) return false;
+  const geholt = await holeTeams(ORGANISATION);
+  return istVerantwortlich({ ...basis, teams: geholt.teams });
+}
+
 /** Die Kennungen und Namen der Stationen über alle Flächen. */
 function stationenVon(board) {
   const namen = new Map();
@@ -1467,43 +2061,15 @@ function stationenVon(board) {
 }
 
 /**
- * Die vorgeschlagenen Dateien einer Anfrage: je Eintrag ein Name und sein Text.
- * `null` heißt: die Liste ist unbrauchbar — dann wird nichts angelegt. Ein
- * fehlender Text ist ein leerer Vorschlag, aber ein leerer Name ist keiner.
- */
-function beitragDateien(wert) {
-  const liste = Array.isArray(wert) ? wert : [];
-  const gesehen = new Set();
-  const ergebnis = [];
-  if (liste.length > 20) return null;
-  for (const eintrag of liste) {
-    if (!eintrag || typeof eintrag !== 'object') return null;
-    const name = dateiName(eintrag.name);
-    if (!name || name.endsWith('/') || gesehen.has(name)) return null;
-    if (typeof eintrag.text !== 'string' && typeof eintrag.inhalt !== 'string') return null;
-    const text = typeof eintrag.text === 'string' ? eintrag.text : eintrag.inhalt;
-    gesehen.add(name);
-    ergebnis.push({ name, text: text.slice(0, MAX_INHALT * 50) });
-  }
-  return ergebnis;
-}
-
-/** Eine Kennung für einen Beitrag, die noch nicht in der Ablage liegt. */
-function beitragKennung(vorhandene) {
-  const basis = zeitStempel();
-  if (!vorhandene.has(basis)) return basis;
-  let nummer = 2;
-  while (vorhandene.has(basis + '-' + nummer)) nummer += 1;
-  return basis + '-' + nummer;
-}
-
-
-/**
  * Die Form, die die Seite liest: eine Fläche je Person, die eigene zuerst.
  * `workflow` und `schritte` der alten Antwort entfallen; die eigene Fläche
  * steht als erster Workflow der eigenen Person darin.
  */
 function datenAntwort(board) {
+  // Ein Archiv ist lesbar, aber nicht beschreibbar. Die Seite sieht denselben
+  // Schalter wie bei fehlendem Schreibrecht: `darf: false` nimmt ihre
+  // Schreibknöpfe weg, ohne die Dateien und Vorhaben zu verbergen.
+  const archiv = istArchiv(AKTIV);
   const personen = Array.isArray(board.personen) ? board.personen : [];
   const bekannt = new Map(personen.map((p) => [p.id, p]));
   const farbeFuer = (wert, i) => (/^#[0-9a-f]{6}$/i.test(String(wert || ''))
@@ -1619,6 +2185,12 @@ function datenAntwort(board) {
     }
     vorgang.verantwortet = verantwortetVon(vorgang, personen);
     vorgang.darf = darfVon(vorgang);
+    if (archiv) {
+      // Im Archiv gibt es keine Handlung am Vorhaben — auch dann nicht, wenn
+      // die eigene Person sie sonst verantwortet. Der Host weist ohnehin ab.
+      vorgang.darf = { aendern: false, verschieben: false, weitergeben: false,
+        zurueckschicken: false, entscheiden: false };
+    }
     vorgang.herkunft = herkunftVon(v);
     vorgang.rueckkehr = rueckkehrVon(v);
     return vorgang;
@@ -1652,23 +2224,1292 @@ function datenAntwort(board) {
     // der Prüfung vor der jeweiligen Route.
     format: FORMAT,
     formatAblage: formatDerAblage(),
+    ...(archiv ? { archiv: true, darf: false } : null),
     workflows,
+    // Alle Stationen, auf die ein Board der Fassung 2 verweist — auch die,
+    // die noch in keinem Workflow stehen. Fassung 1 kennt das Feld nicht.
+    ...(Array.isArray(board.stationen) ? { stationen: board.stationen } : null),
     vorgaenge,
     beitraege,
     personen,
     einstellungen: board.einstellungen || {},
     stand: board.stand || standWert(),
+    // Ein Board der Fassung 2 besteht aus vielen Repositories; jedes trägt
+    // seinen eigenen Stand. Fassung 1 kennt das Feld nicht.
+    ...(Array.isArray(board.staende) ? { staende: board.staende } : null),
     // Wer ich bin und welche Boards ich benutze. Beides gilt für die Seite,
     // nicht für die Ablage.
     identitaet: IDENTITAET,
-    hauptboard: HAUPTBOARD,
+    hauptboard: hauptboardAdresse(),
     ...registerFuerSeite(),
   };
+}
+
+/**
+ * Das neu zusammengesetzte Board der Fassung 2 in der Form von `/board/data`.
+ * Die Routen, die ein Repository dieser Fassung beschreiben, antworten mit
+ * demselben Bild — so sieht die Seite danach genau das, was der nächste
+ * Leseaufruf brächte.
+ *
+ * `darf` sagt, ob in dieses Board geschrieben werden darf. Ohne Schreibrecht
+ * bleibt es beim Lesen: jede Handlung am Vorhaben ist dann gesperrt, und die
+ * Seite bietet keine Schreibknöpfe an. `darfGrund` und `darfHinweis` nennen
+ * den Grund und den Weg — aber nur, wenn `darf` falsch ist.
+ */
+async function schreibrechtFuerBoard() {
+  try {
+    return await schreibrecht({
+      pfad: REPO,
+      home: HOME,
+      client: erstelleClient({ home: HOME }),
+    });
+  } catch {
+    // Ein Fehler ist kein Schreibrecht; das Board bleibt lesbar.
+    return {
+      darf: false,
+      grund: GRUND_NICHT_PRUEFBAR,
+      hinweis: HINWEIS_NICHT_PRUEFBAR,
+    };
+  }
+}
+
+/** Dieselbe Frage als kurze Antwort für die schreibenden Wege. */
+async function darfFuerBoard() {
+  return (await schreibrechtFuerBoard()).darf === true;
+}
+
+/**
+ * Das Schreibrecht, soweit es ohne Netz zu wissen ist: lokal ohne Remote ja,
+ * mit Remote und ohne Token nein samt Grund, `null` wenn der Token befragt
+ * werden muss. Damit antwortet `/board/data` in den einfachen Fällen sofort
+ * und nur im dritten Fall nach der Rückfrage.
+ */
+function darfSchnell() {
+  if (!remoteAdresse()) return { darf: true };
+  if (!liesToken(HOME)) {
+    return { darf: false, grund: GRUND_OHNE_TOKEN, hinweis: HINWEIS_OHNE_TOKEN };
+  }
+  return null;
+}
+
+/** Der Hinweis, wenn ohne Anmeldung nichts Neues entstehen kann. */
+const ANLEGEN_HINWEIS = 'Melde dich in den Einstellungen unter GitHub mit einem '
+  + 'Token an; danach entstehen neue Stationen und Vorhaben unter dem Eigentümer.';
+
+/**
+ * Neue Dinge entstehen unter dem Eigentümer und brauchen eine Anmeldung.
+ * Ohne Token nennt die Antwort den Weg; mit Token sagt sie ja — ob die Anlage
+ * wirklich gelingt, prüft erst der Weg, der sie unternimmt.
+ */
+function anlegenBild() {
+  if (!liesToken(HOME)) {
+    return { darf: false, grund: GRUND_OHNE_TOKEN, hinweis: ANLEGEN_HINWEIS };
+  }
+  return { darf: true };
+}
+
+/**
+ * Das Bild der Fassung 2 mit Schreibrecht, Grund und der Antwort fürs
+ * Anlegen. `recht` ist die Antwort aus `schreibrecht(...)`; ein einfacher
+ * Wahrheitswert gilt als „ja“ oder als „nein“ ohne näheren Grund.
+ */
+function fassung2Bild(board, recht = { darf: false }) {
+  const bild = mitAbleitung(board);
+  bild.vorgaenge = Array.isArray(bild.vorgaenge) ? bild.vorgaenge : [];
+  // Die alte Anzeige liest weiter eine Zusammenfassung; die Seite zeigt
+  // daneben die Zeile je Repository.
+  bild.stand = Array.isArray(bild.staende) && bild.staende.length
+    ? zusammenfassen(bild.staende)
+    : standWert();
+  const antwort = datenAntwort(bild);
+  antwort.format = AKTIV.format;
+  antwort.formatAblage = AKTIV.format;
+  // Die alten Felder bleiben auch hier lesbar; die Seite nimmt zuerst die
+  // Fläche je Person.
+  antwort.workflow = bild.workflow;
+  antwort.schritte = bild.schritte;
+  antwort.luecken = Array.isArray(bild.luecken) ? bild.luecken : [];
+  // Die Sichtbarkeit des offenen Boards und das Schreibrecht. Die Lücken der
+  // Verweisprüfung stehen in `luecken`, nicht in einer eigenen Liste.
+  antwort.sichtbarkeit = bild.sichtbarkeit || sichtbarkeitVon(HOME, REPO);
+  const wert = recht && typeof recht === 'object' ? recht : { darf: recht === true };
+  antwort.darf = wert.darf === true;
+  // Neue Dinge unter dem Eigentümer: ohne Anmeldung nicht, mit Token ja.
+  antwort.anlegen = anlegenBild();
+  if (!antwort.darf) {
+    const grund = String(wert.grund || '').trim();
+    const hinweis = String(wert.hinweis || '').trim();
+    antwort.darfGrund = grund || 'Kein Schreibrecht für dieses Board.';
+    if (hinweis) antwort.darfHinweis = hinweis;
+    // Kein Schreibrecht: auch die Handlungen am Vorhaben sind gesperrt, damit
+    // die Seite ihre Knöpfe nicht anbietet.
+    for (const vorgang of antwort.vorgaenge) {
+      vorgang.darf = {
+        aendern: false,
+        verschieben: false,
+        weitergeben: false,
+        zurueckschicken: false,
+        entscheiden: false,
+      };
+    }
+  }
+  return antwort;
+}
+
+async function fassung2Antwort() {
+  const board = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+  return fassung2Bild(board, await schreibrechtFuerBoard());
+}
+
+/**
+ * Darf in das offene Board geschrieben werden — und wenn nicht, warum? Es gilt
+ * dieselbe Einordnung wie in `/board/data`: ein Archiv bleibt lesbar, ein Board
+ * der Fassung 2 ohne Schreibrecht antwortet mit dem Grund. Ein Board der
+ * Fassung 1 schreibt lokal; dafür braucht es keine Anmeldung.
+ */
+async function rechtDesOffenenBoards() {
+  if (!AKTIV) return { darf: false, grund: 'Noch kein Board verbunden' };
+  if (istArchiv(AKTIV)) return { darf: false, grund: 'Die alte Ablage ist Archiv' };
+  if (AKTIV.format !== 2) return { darf: true };
+  if (!existsSync(join(AKTIV.repo, 'board.json'))) {
+    return {
+      darf: false,
+      grund: String(AKTIV.fehler || '').trim()
+        || 'Der Ordner dieses Boards fehlt: ' + AKTIV.repo,
+    };
+  }
+  const schnell = darfSchnell();
+  const recht = schnell === null ? await schreibrechtFuerBoard() : schnell;
+  if (recht.darf === true) return { darf: true };
+  return {
+    darf: false,
+    grund: String(recht.grund || '').trim() || 'Kein Schreibrecht für dieses Board.',
+    ...(recht.hinweis ? { hinweis: String(recht.hinweis) } : null),
+  };
+}
+
+/**
+ * Das offene Board für `GET /board/board`: Registereintrag, Format, Art,
+ * Sichtbarkeit und Schreibrecht. Die Verweise der Fassung 2 stehen daneben,
+ * die Fläche selbst — Workflows, Stationen, Vorhaben — bleibt weg.
+ */
+async function offenesBoardBild() {
+  const eintrag = registerFuerSeite().boards.find((b) => b.aktiv) || null;
+  const board = { ...(eintrag || {}), repo: AKTIV.repo };
+  let fehler = String(AKTIV.fehler || '').trim();
+  const bild = {
+    board,
+    format: AKTIV.format,
+    art: AKTIV.art,
+    sichtbarkeit: board.sichtbarkeit || sichtbarkeitVon(HOME, AKTIV.repo),
+  };
+  if (AKTIV.format === 2) {
+    try {
+      const daten = liesBoardFassung2(AKTIV.repo);
+      bild.verweise = {
+        workflows: daten.workflows,
+        vorhaben: daten.vorhaben,
+        stationen: daten.stationen,
+      };
+    } catch (error) {
+      fehler = fehler || String((error && error.message) || error);
+    }
+  }
+  if (fehler) bild.fehler = fehler;
+  const recht = fehler ? { darf: false, grund: fehler } : await rechtDesOffenenBoards();
+  bild.darf = recht.darf === true;
+  bild.darfGrund = bild.darf
+    ? ''
+    : String(recht.grund || 'Kein Schreibrecht für dieses Board.');
+  if (!bild.darf && recht.hinweis) bild.darfHinweis = String(recht.hinweis);
+  return bild;
+}
+
+/** Das Bild des offenen Boards in der Form von `GET /board/data`. */
+async function bildDesOffenenBoards() {
+  if (AKTIV && AKTIV.format === 2) return await fassung2Antwort();
+  const board = mitAbleitung(liesBoard());
+  board.vorgaenge = Array.isArray(board.vorgaenge) ? board.vorgaenge : [];
+  board.stand = standWert();
+  return datenAntwort(board);
+}
+
+/**
+ * Der Workflow des offenen Boards für `GET /board/workflow`. Gelesen wird der
+ * erste Workflow, den das Board nennt — derselbe, den `/board/data` als
+ * `workflow` zeigt. Fassung 1 legt ihre Workflows je Person ab; dort steht
+ * der eigene. Fehlt ein Workflow oder ist er nicht lesbar, kommt der Grund
+ * zurück und die Route antwortet mit 409.
+ */
+function workflowDesOffenenBoards() {
+  const kopf = {
+    board: {
+      id: AKTIV.id,
+      name: AKTIV.name,
+      repo: AKTIV.repo,
+      art: AKTIV.art,
+      format: AKTIV.format,
+    },
+    format: AKTIV.format,
+  };
+  if (AKTIV.format !== 2) {
+    const eigene = liesWorkflows(REPO, PERSON_ID).find((p) => p.ich) || null;
+    const workflow = eigene && eigene.workflows[0] ? eigene.workflows[0] : null;
+    if (!workflow) {
+      return { status: 409, daten: { ...kopf, error: 'Dieses Board hat keinen Workflow.' } };
+    }
+    const { schritte, ...rest } = workflow;
+    return {
+      status: 200,
+      daten: {
+        ...kopf,
+        verweis: 'workflows/' + eigene.id + '.json',
+        ort: join(REPO, 'workflows', eigene.id + '.json'),
+        // Fassung 1 kennt keine Fassungen eines Workflows.
+        fassung: '',
+        ...rest,
+        stationen: schritte,
+      },
+    };
+  }
+
+  let board;
+  try {
+    board = liesBoardFassung2(REPO);
+  } catch (error) {
+    return {
+      status: 409,
+      daten: {
+        ...kopf,
+        error: 'Das Board lässt sich nicht lesen: '
+          + String((error && error.message) || error),
+      },
+    };
+  }
+  const verweis = board.workflows[0] || null;
+  if (!verweis) {
+    return { status: 409, daten: { ...kopf, error: 'Dieses Board hat keinen Workflow.' } };
+  }
+
+  // Der Verweis wird gegen das Board aufgelöst — wie in der Komposition, ohne
+  // Netz: ein Verweis auf eine Adresse bleibt ohne Ort und damit unlesbar.
+  const ort = ortImRepo(verweis.repo, REPO);
+  const kennungDesVerweises = {
+    verweis: String(verweis.repo),
+    fassung: verweis.fassung,
+    ort: ort || '',
+  };
+  let gelesen = null;
+  let grund = '';
+  try {
+    if (!ort || !existsSync(ort)) {
+      grund = 'Der Ordner des Workflows fehlt: ' + String(verweis.repo);
+    } else if (liesRepo(ort).art !== 'workflow') {
+      grund = 'Der Ordner ist kein Workflow: ' + ort;
+    } else {
+      gelesen = liesWorkflow(ort);
+    }
+  } catch (error) {
+    grund = String((error && error.message) || error);
+  }
+  if (!gelesen) {
+    return {
+      status: 409,
+      daten: { ...kopf, ...kennungDesVerweises, error: 'Der Workflow ist nicht lesbar: ' + grund },
+    };
+  }
+
+  // Die Stationen so weit lesen, wie sie lokal liegen: fehlt eine, bleibt ihr
+  // Verweis stehen und `fehlt` sagt es. Gelesen wird die genannte Fassung.
+  const stationen = gelesen.stationen.map((eintrag) => {
+    const stationsOrt = ortImRepo(eintrag.repo, ort);
+    let station = null;
+    let fassungFehlt = false;
+    let stationsGrund = '';
+    if (!stationsOrt || !existsSync(stationsOrt)) {
+      stationsGrund = 'Der Ordner der Station fehlt: ' + String(eintrag.repo);
+    } else {
+      try {
+        if (liesRepo(stationsOrt).art !== 'station') {
+          stationsGrund = 'Der Ordner ist keine Station: ' + stationsOrt;
+        } else {
+          const gelesenStation = liesStationAufFassung(stationsOrt, eintrag.fassung);
+          fassungFehlt = gelesenStation.fassungFehlt;
+          station = gelesenStation.station || liesStation(stationsOrt);
+        }
+      } catch (error) {
+        stationsGrund = String((error && error.message) || error);
+      }
+    }
+    return {
+      ...eintrag,
+      ort: stationsOrt || '',
+      name: station ? station.name : '',
+      host: station ? station.host : '',
+      fehlt: !station,
+      fassungFehlt,
+      ...(stationsGrund ? { grund: stationsGrund } : null),
+    };
+  });
+
+  return {
+    status: 200,
+    daten: {
+      ...kopf,
+      ...kennungDesVerweises,
+      id: gelesen.id,
+      titel: gelesen.titel,
+      beschreibung: gelesen.beschreibung,
+      autor: gelesen.autor,
+      stationen,
+      positionen: gelesen.positionen,
+      kanten: gelesen.kanten,
+      layout: gelesen.layout,
+      regeln: gelesen.regeln,
+    },
+  };
+}
+
+/**
+ * Der Eigentümer eines Boards: ein GitHub-Login oder eine Organisation, unter
+ * der neue Repositories entstehen. Kein Board-Typ und keine Board-Kennung
+ * bringt einen eigenen Namen mit — die Auflösung gilt für jedes Board gleich.
+ */
+const EIGENTUEMER_MUSTER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+
+/** Der deutsche Hinweis, wenn weder Eintrag noch Anmeldung einen Namen geben. */
+const EIGENTUEMER_HINWEIS = 'Noch kein Eigentümer bekannt. Melde dich mit einem '
+  + 'GitHub-Token an; die Anmeldung trägt deinen Login ein. Alternativ lässt sich '
+  + 'ein GitHub-Login oder eine Organisation eintragen.';
+
+/** Der gesetzte Eigentümer aus `einstellungen.eigentuemer`, getrimmt. */
+function gesetzterEigentuemer(board) {
+  const einstellungen = board && board.einstellungen;
+  if (!einstellungen || typeof einstellungen !== 'object'
+    || Array.isArray(einstellungen)) {
+    return '';
+  }
+  return String(einstellungen.eigentuemer == null
+    ? '' : einstellungen.eigentuemer).trim();
+}
+
+/**
+ * Die Auflösung ohne Netz: gesetzter Eintrag, kein Token oder ein schon
+ * gemerkter Login antworten sofort. `null` heißt, der Login müsste erst bei
+ * GitHub erfragt werden.
+ */
+function eigentuemerBildSchnell(board) {
+  const gesetzt = gesetzterEigentuemer(board);
+  if (gesetzt) {
+    return { eigentuemer: gesetzt, eigentuemerQuelle: 'gesetzt' };
+  }
+  const token = liesToken(HOME);
+  if (!token) {
+    return {
+      eigentuemer: '',
+      eigentuemerQuelle: 'leer',
+      eigentuemerHinweis: EIGENTUEMER_HINWEIS,
+    };
+  }
+  const login = liesLogin(HOME);
+  if (!login) return null;
+  return { eigentuemer: login, eigentuemerQuelle: 'angemeldet' };
+}
+
+/**
+ * Woher der Eigentümer kommt und wie er heißt. Ist im Board einer gesetzt,
+ * gilt er. Sonst gilt der zum gespeicherten Token bekannte Login; fehlt er,
+ * wird er höchstens einmal bei GitHub erfragt. Ohne Netz bleibt es bei `leer`
+ * samt Hinweis — ein Lesen des Boards scheitert daran nicht.
+ */
+async function eigentuemerBild(board) {
+  const schnell = eigentuemerBildSchnell(board);
+  if (schnell) return schnell;
+  const token = liesToken(HOME);
+  let login = '';
+  try {
+    const ich = await erstelleClient({ home: HOME, token }).ich();
+    login = String((ich && ich.login) || '').trim();
+  } catch {
+    login = '';
+  }
+  if (!login) {
+    return {
+      eigentuemer: '',
+      eigentuemerQuelle: 'leer',
+      eigentuemerHinweis: EIGENTUEMER_HINWEIS,
+    };
+  }
+  return { eigentuemer: login, eigentuemerQuelle: 'angemeldet' };
+}
+
+/**
+ * Eine Einstellung in `board.json` der Fassung 2 setzen oder — bei leerem
+ * Wert — entfernen. Geschrieben wird die Datei roh, damit alle anderen
+ * Angaben des Boards unverändert bleiben.
+ */
+function schreibeFassung2Einstellung(name, wert) {
+  const datei = join(REPO, 'board.json');
+  let roh;
+  try {
+    roh = JSON.parse(readFileSync(datei, 'utf8'));
+  } catch {
+    throw fehlerMit('board.json lässt sich nicht lesen', 409);
+  }
+  if (!roh || typeof roh !== 'object' || Array.isArray(roh)) {
+    throw fehlerMit('board.json ist kein Board', 409);
+  }
+  const bisher = roh.einstellungen && typeof roh.einstellungen === 'object'
+    && !Array.isArray(roh.einstellungen) ? { ...roh.einstellungen } : {};
+  if (wert) bisher[name] = wert;
+  else delete bisher[name];
+  roh.einstellungen = bisher;
+  writeFileSync(datei + '.tmp', JSON.stringify(roh, null, 2) + '\n', 'utf8');
+  renameSync(datei + '.tmp', datei);
+}
+
+/* --- Eine Station anlegen -----------------------------------------------
+ *
+ * Eine Station ist ein eigenes, öffentliches Repository unter dem Eigentümer:
+ * `station-<slug>` mit `station.json`, `README.md` und einer Fassung. Gebaut
+ * wird zuerst im Zwischenspeicher (`$DSH_HOME/board/cache/<owner>/<repo>`),
+ * damit der Ordner ohne Netz lesbar ist.
+ *
+ * Der Weg dorthin ist eine Schnittstelle mit zwei Umsetzungen: `selbst` prüft
+ * bei GitHub und legt das Repository dort an; `attrappe` prüft nur den
+ * Zwischenspeicher, schickt nichts und meldet Erfolg. Die Wahl steht in
+ * `einstellungen.anlegeweg`; die Vorgabe ist `selbst`. `attrappe` ist nur über
+ * die Einstellung erreichbar, nie in der Oberfläche.
+ *
+ * Beide Wege kennen `pruefen` (`{ frei }`) und `anlegen`
+ * (`{ owner, repo, beschreibung, themen, dateien }` → `{ owner, repo, remote }`).
+ * Ein Fehler trägt eine deutsche Meldung und einen Code (`belegt`,
+ * `nicht-pruefbar`, `github`); die Route macht daraus den HTTP-Status.
+ */
+
+/** Das Thema, das jede Station bei GitHub trägt. */
+const STATION_THEMA = 'dsh-board-station';
+
+/** Die Namen der beiden Anlegewege. */
+const ANLEGEWEGE = new Set(['selbst', 'attrappe']);
+
+function anlegeFehler(meldung, code) {
+  const fehler = new Error(meldung);
+  fehler.code = code;
+  return fehler;
+}
+
+/**
+ * Wie ein Anlegeweg das Ding nennt, das entstehen soll. Die Vorgabe ist eine
+ * Station; ein Vorhaben sagt es mit, damit eine Fehlermeldung nicht das
+ * falsche Ding nennt.
+ */
+function anlegeWort(art) {
+  return art === 'vorhaben'
+    ? { ein: 'Ein Vorhaben', das: 'Das Vorhaben' }
+    : { ein: 'Eine Station', das: 'Die Station' };
+}
+
+/**
+ * GitHub verweigert das Anlegen. Der Grund ist fast immer der Eigentümer: der
+ * Token gehört zu einem anderen Konto und darf in einer Organisation keine
+ * Repositories anlegen. Die Meldung nennt beides — Eigentümer und Anmeldung —,
+ * damit der Weg klar ist: Konto als Eigentümer oder Token mit Recht auf die
+ * Organisation.
+ */
+function verweigerungText(wort, owner, login) {
+  const angemeldet = String(login || '').trim();
+  if (angemeldet && angemeldet.toLowerCase() !== String(owner).toLowerCase()) {
+    return wort.das + ' ließ sich bei GitHub nicht anlegen: GitHub verweigert '
+      + 'das Anlegen unter „' + owner + '“. Der Token gehört zu „' + angemeldet
+      + '“ und darf dort keine Repositories anlegen. Setze den Eigentümer in '
+      + 'den Einstellungen auf dein Konto oder nimm einen Token mit Recht auf '
+      + 'die Organisation.';
+  }
+  return wort.das + ' ließ sich bei GitHub nicht anlegen: GitHub verweigert '
+    + 'das Anlegen unter „' + owner + '“. Der Token gehört zu „'
+    + (angemeldet || 'deinem Konto') + '“ und hat dort kein Recht, Repositories '
+    + 'anzulegen. Prüfe die Rechte des Tokens: er braucht das Recht, '
+    + 'Repositories anzulegen.';
+}
+
+/**
+ * Der gewählte Anlegeweg aus dem Board. Ein fehlender oder leerer Wert
+ * bedeutet `selbst`; ein gesetzter, unbekannter Wert ist ein Fehler mit 409
+ * und wird nicht still zu `selbst`.
+ */
+function anlegewegName(board) {
+  const einstellungen = board && board.einstellungen;
+  const wert = einstellungen && typeof einstellungen === 'object'
+    && !Array.isArray(einstellungen) && einstellungen.anlegeweg != null
+    ? String(einstellungen.anlegeweg).trim()
+    : '';
+  if (!wert) return 'selbst';
+  if (ANLEGEWEGE.has(wert)) return wert;
+  throw fehlerMit(
+    'Unbekannter Anlegeweg: „' + wert + '“ ist weder „selbst“ noch „attrappe“.',
+    409,
+  );
+}
+
+/**
+ * Der Weg über GitHub. `pruefen` fragt das Repository ab: 404 heißt frei,
+ * 200 heißt belegt, jeder andere Fehler ist keine Antwort und wird zu 502.
+ * `anlegen` legt das öffentliche Repository an, setzt das Thema und schreibt
+ * die beiden Dateien über die Inhalts-API. Ein `git push` findet nicht statt.
+ */
+function anlegewegSelbst(client) {
+  return {
+    name: 'selbst',
+    async pruefen({ owner, repo, art = 'station' }) {
+      try {
+        await client.repo(owner, repo);
+      } catch (fehler) {
+        if (Number(fehler && fehler.status) === 404) return { frei: true };
+        throw anlegeFehler(
+          'Der Name lässt sich bei GitHub nicht prüfen: ' + kurzZeile(fehler),
+          'nicht-pruefbar',
+        );
+      }
+      return {
+        frei: false,
+        meldung: anlegeWort(art).ein + ' mit diesem Namen gibt es schon',
+        code: 'belegt',
+      };
+    },
+    async anlegen({ owner, repo, beschreibung, themen, dateien, art = 'station' }) {
+      // Ist der Eigentümer der angemeldete Login, entsteht das Repository
+      // unter `/user/repos`; sonst unter der Organisation.
+      let eigenes = false;
+      let angemeldet = '';
+      try {
+        const ich = await client.ich();
+        angemeldet = String((ich && ich.login) || '').trim();
+        eigenes = angemeldet.toLowerCase()
+          === String(owner).trim().toLowerCase();
+      } catch (fehler) {
+        throw anlegeFehler(
+          'Die Anmeldung ließ sich nicht prüfen: ' + kurzZeile(fehler),
+          'nicht-pruefbar',
+        );
+      }
+
+      let angelegt = null;
+      try {
+        angelegt = await client.erstelleRepo(owner, {
+          name: repo,
+          privat: false,
+          beschreibung,
+          themen,
+          eigenes,
+        });
+      } catch (fehler) {
+        // Ein „Nein“ von GitHub wird übersetzt: der Eigentümer und die
+        // Anmeldung stehen in der Meldung, nicht nur der Statuscode.
+        if (Number(fehler && fehler.status) === 403) {
+          throw anlegeFehler(
+            verweigerungText(anlegeWort(art), owner, angemeldet), 'verweigert',
+          );
+        }
+        throw anlegeFehler(
+          anlegeWort(art).das + ' ließ sich bei GitHub nicht anlegen: '
+            + kurzZeile(fehler),
+          'github',
+        );
+      }
+      // Erst danach die Dateien: scheitert das Schreiben, entsteht keine
+      // Meldung „ließ sich nicht anlegen“, denn das Repository steht schon.
+      try {
+        for (const datei of dateien) {
+          await client.setzeInhalt(owner, repo, datei.pfad, datei.inhalt,
+            datei.nachricht || '');
+        }
+      } catch (fehler) {
+        throw anlegeFehler(
+          'Das Repository ' + owner + '/' + repo + ' wurde angelegt, aber die '
+            + 'Dateien ließen sich nicht schreiben: ' + kurzZeile(fehler)
+            + '. Das Repository bleibt bei GitHub; lösche es dort, wenn es '
+            + 'nicht bleiben soll.',
+          'github',
+        );
+      }
+      return {
+        owner,
+        repo,
+        remote: String((angelegt && angelegt.adresse) || '')
+          || githubAdresse(owner, repo),
+      };
+    },
+  };
+}
+
+/**
+ * Der Weg ohne Netz. `pruefen` sieht nur in den Zwischenspeicher; `anlegen`
+ * schickt nichts und meldet Erfolg. Der nachgebildete GitHub-Server sieht bei
+ * ihm keinen einzigen Aufruf.
+ */
+function anlegewegAttrappe() {
+  return {
+    name: 'attrappe',
+    async pruefen({ owner, repo, art = 'station' }) {
+      const pfad = cachePfad(HOME, owner, repo);
+      if (pfad && existsSync(pfad)) {
+        return {
+          frei: false,
+          meldung: anlegeWort(art).ein + ' mit diesem Namen gibt es schon',
+          code: 'belegt',
+        };
+      }
+      return { frei: true };
+    },
+    async anlegen({ owner, repo }) {
+      return { owner, repo, remote: '' };
+    },
+  };
+}
+
+/**
+ * Der Weg zum Anlegen. Ein gesetzter, aber unbekannter Wert bricht hier mit
+ * 409 ab — vor jedem GitHub-Aufruf und ohne stillen Rückfall auf `selbst`.
+ */
+function anlegewegFuer(board) {
+  if (anlegewegName(board) === 'attrappe') return anlegewegAttrappe();
+  return anlegewegSelbst(erstelleClient({ home: HOME }));
+}
+
+/** Was eine Station in ihren beiden Dateien sagt. */
+function stationInhalt({
+  slugName, name, beschreibung, owner,
+}) {
+  const station = {
+    format: 2,
+    id: slugName,
+    name,
+    beschreibung,
+    host: owner,
+    eingang: [],
+    ausgabe: [],
+    aktion: { art: 'textfeld', wert: beschreibung },
+    beispiele: [],
+    reife: 'entwurf',
+    lizenz: 'nicht angegeben',
+    tags: [],
+  };
+  const inhalt = JSON.stringify(station, null, 2) + '\n';
+  const readme = '# ' + name + '\n\n'
+    + (beschreibung || 'Eine Station des Collaboration Boards.')
+    + '\n\nThema: ' + STATION_THEMA + '\n';
+  return {
+    station,
+    readme,
+    dateien: [
+      {
+        pfad: 'station.json',
+        inhalt,
+        nachricht: 'Station „' + name + '“ angelegt',
+      },
+      {
+        pfad: 'README.md',
+        inhalt: readme,
+        nachricht: 'README der Station „' + name + '“',
+      },
+    ],
+  };
+}
+
+/**
+ * Das lokale Repository: Ordner, `station.json`, `README.md`, `git init -b
+ * main`, `add`, `commit`. Ein Remote wird nicht gesetzt; so gerät kein Token
+ * in `.git/config`, in Argumente oder in eine Adresse.
+ */
+function baueStation({
+  owner, repo, station, readme, nachricht, autor,
+}) {
+  const pfad = cachePfad(HOME, owner, repo);
+  if (!pfad) throw fehlerMit('Ohne Zuhause gibt es keinen Zwischenspeicher', 500);
+  if (existsSync(pfad)) {
+    throw fehlerMit('Eine Station mit diesem Namen gibt es schon', 409);
+  }
+  mkdirSync(pfad, { recursive: true });
+  writeFileSync(join(pfad, 'station.json'),
+    JSON.stringify(station, null, 2) + '\n', 'utf8');
+  writeFileSync(join(pfad, 'README.md'), readme, 'utf8');
+  legeRepoAn(pfad, nachricht, autor);
+  return pfad;
+}
+
+/**
+ * Den Verweis `owner/repo` in eine der Listen des Boards aufnehmen; doppelt
+ * steht er einmal da. Geschrieben wird die Datei roh, damit alle anderen
+ * Angaben des Boards unverändert bleiben. Zurück kommt `true`, wenn der
+ * Verweis neu ist.
+ */
+function schreibeFassung2Verweis(feld, verweis) {
+  const datei = join(REPO, 'board.json');
+  let roh;
+  try {
+    roh = JSON.parse(readFileSync(datei, 'utf8'));
+  } catch {
+    throw fehlerMit('board.json lässt sich nicht lesen', 409);
+  }
+  if (!roh || typeof roh !== 'object' || Array.isArray(roh)) {
+    throw fehlerMit('board.json ist kein Board', 409);
+  }
+  const liste = Array.isArray(roh[feld]) ? roh[feld] : [];
+  const gesucht = String(verweis).trim().toLowerCase();
+  if (liste.some((eintrag) => String(eintrag && eintrag.repo == null
+    ? '' : eintrag.repo).trim().toLowerCase() === gesucht)) {
+    return false;
+  }
+  liste.push({ repo: verweis });
+  roh[feld] = liste;
+  writeFileSync(datei + '.tmp', JSON.stringify(roh, null, 2) + '\n', 'utf8');
+  renameSync(datei + '.tmp', datei);
+  return true;
+}
+
+function schreibeFassung2Station(verweis) {
+  return schreibeFassung2Verweis('stationen', verweis);
+}
+
+function schreibeFassung2Vorhaben(verweis) {
+  return schreibeFassung2Verweis('vorhaben', verweis);
+}
+
+/** Das Thema, das jedes Vorhaben bei GitHub trägt. */
+const VORHABEN_THEMA = 'dsh-board-vorhaben';
+
+/** Die Meldung, wenn der Name im Zwischenspeicher oder bei GitHub belegt ist. */
+const VORHABEN_BELEGT = 'Ein Vorhaben mit diesem Namen gibt es schon';
+
+/** Die Farbe, wenn das Board keine für die handelnde Person nennt. */
+const VORHABEN_FARBE = '#fbbf24';
+
+/**
+ * Die Farbe der handelnden Person aus dem Board: zuerst der Eintrag, dessen
+ * Login zur Anmeldung gehört, sonst die eigene Kennung. Gibt es keinen,
+ * bleibt es bei der Vorgabefarbe.
+ */
+function farbeDerHandelnden(board, login) {
+  const personen = board && Array.isArray(board.personen) ? board.personen : [];
+  const suche = (wert) => String(wert == null ? '' : wert).trim().toLowerCase();
+  const kandidaten = [suche(login), suche(PERSON_ID)].filter(Boolean);
+  for (const gesucht of kandidaten) {
+    const person = personen.find((eintrag) => eintrag
+      && suche(eintrag.login) === gesucht);
+    const farbe = String((person && person.farbe) || '');
+    if (/^#[0-9a-f]{6}$/i.test(farbe)) return farbe;
+  }
+  return VORHABEN_FARBE;
+}
+
+/**
+ * Was ein Vorhaben in seinen beiden Dateien sagt. Der Verweis auf den Workflow
+ * behält die Angabe aus dem Board samt Fassung; die verantwortliche Person
+ * ist der angemeldete Login. Ist keiner bekannt, bleibt die Liste leer.
+ */
+function vorhabenInhalt({
+  slugName, name, station, stationName, workflow, login, farbe,
+}) {
+  const vorhaben = {
+    format: 2,
+    id: slugName,
+    name,
+    workflow: { repo: workflow.repo, fassung: workflow.fassung },
+    position: station,
+    verantwortliche: { [station]: login ? [login] : [] },
+    laeufe: [],
+    farbe,
+  };
+  const inhalt = JSON.stringify(vorhaben, null, 2) + '\n';
+  const readme = '# ' + name + '\n\n'
+    + 'Vorhaben an der Station „' + (stationName || station) + '“ ('
+    + station + ') des Workflows „' + workflow.repo + '“ (Fassung '
+    + workflow.fassung + ').\n\nThema: ' + VORHABEN_THEMA + '\n';
+  return {
+    vorhaben,
+    readme,
+    dateien: [
+      {
+        pfad: 'vorhaben.json',
+        inhalt,
+        nachricht: 'Vorhaben „' + name + '“ angelegt',
+      },
+      {
+        pfad: 'README.md',
+        inhalt: readme,
+        nachricht: 'README des Vorhabens „' + name + '“',
+      },
+    ],
+  };
+}
+
+/**
+ * Das lokale Repository eines Vorhabens: Ordner, `vorhaben.json`,
+ * `README.md`, `git init -b main`, `add`, `commit`. Kein Remote; so gerät kein
+ * Token in `.git/config`, in Argumente oder in eine Adresse.
+ */
+function baueVorhaben({
+  owner, repo, vorhaben, readme, nachricht, autor,
+}) {
+  const pfad = cachePfad(HOME, owner, repo);
+  if (!pfad) throw fehlerMit('Ohne Zuhause gibt es keinen Zwischenspeicher', 500);
+  if (existsSync(pfad)) {
+    throw fehlerMit('Ein Vorhaben mit diesem Namen gibt es schon', 409);
+  }
+  mkdirSync(pfad, { recursive: true });
+  writeFileSync(join(pfad, 'vorhaben.json'),
+    JSON.stringify(vorhaben, null, 2) + '\n', 'utf8');
+  writeFileSync(join(pfad, 'README.md'), readme, 'utf8');
+  legeRepoAn(pfad, nachricht, autor);
+  return pfad;
+}
+
+/** Der HTTP-Status zu einem Fehler des Anlegewegs. */
+function anlegeStatus(fehler) {
+  const code = String((fehler && fehler.code) || '');
+  if (code === 'belegt') return 409;
+  // Ein „Nein“ von GitHub wegen fehlenden Rechts ist ein Recht, kein
+  // Serverfehler: die Seite zeigt ihn wie andere Verbote.
+  if (code === 'verweigert') return 403;
+  if (code === 'nicht-pruefbar' || code === 'github') return 502;
+  return Number(fehler && fehler.status) || 500;
+}
+
+/**
+ * Eine Datei in einem Vorhaben der Fassung 2 speichern. Sie liegt im eigenen
+ * Repository des Vorhabens; gefasst wird dort, nicht im Board. Geprüft wird in
+ * dieser Reihenfolge: Board (409), Vorhaben (404), Ordner (409), Recht (403),
+ * Pfad (400), Basis (409) — erst danach wird geschrieben.
+ *
+ * Die Basisprüfung ist dieselbe wie in der alten Ablage: ein überholter Stand
+ * überschreibt nichts, der neue Text und die neue Basis gehen zurück. Ein
+ * Push folgt nicht; der gehört zum Abgleich (Schritt 39).
+ */
+async function speichereImVorhaben(koerper, res) {
+  try {
+    if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+    // Erst lesen, dann entscheiden: ein unlesbares Board ist keine Grundlage.
+    try {
+      liesBoardFassung2(REPO);
+    } catch (fehler) {
+      sende(res, 409, { error: 'Das Board ist nicht lesbar: ' + kurzZeile(fehler) });
+      return;
+    }
+
+    let zusammengesetzt;
+    try {
+      zusammengesetzt = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+    } catch (fehler) {
+      sende(res, 409, {
+        error: 'Das Board lässt sich nicht lesen: ' + kurzZeile(fehler),
+      });
+      return;
+    }
+    const eintrag = (zusammengesetzt.vorgaenge || [])
+      .find((v) => v.id === koerper.vorhaben);
+    if (!eintrag) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
+
+    const ordner = String(eintrag.ordner || '').trim();
+    let istOrdner = false;
+    try {
+      istOrdner = Boolean(ordner) && statSync(ordner).isDirectory();
+    } catch {
+      istOrdner = false;
+    }
+    if (!istOrdner) {
+      sende(res, 409, {
+        error: 'Der Ordner des Vorhabens fehlt: '
+          + String(eintrag.name || eintrag.id),
+      });
+      return;
+    }
+
+    // Das Recht steht im Bild der Fläche: die handelnde Person am Vorhaben und
+    // das Schreibrecht des Boards. Danach das Recht am Repository selbst —
+    // ein Vorhaben mit Remote ohne Token bleibt gesperrt.
+    const bild = fassung2Bild(zusammengesetzt, await schreibrechtFuerBoard());
+    if (bild.darf !== true) {
+      sende(res, 403, {
+        error: String(bild.darfGrund || 'Kein Schreibrecht für dieses Board.'),
+        ...(bild.darfHinweis ? { hinweis: bild.darfHinweis } : null),
+      });
+      return;
+    }
+    const vorgang = (bild.vorgaenge || []).find((v) => v.id === eintrag.id);
+    if (!vorgang || !vorgang.darf || vorgang.darf.aendern !== true) {
+      sende(res, 403, { error: 'Dieses Vorhaben verantwortet jemand anderes.' });
+      return;
+    }
+    const recht = await schreibrecht({ pfad: ordner, home: HOME });
+    if (recht.darf !== true) {
+      sende(res, 403, {
+        error: String(recht.grund || 'Kein Schreibrecht für dieses Vorhaben.'),
+        ...(recht.hinweis ? { hinweis: recht.hinweis } : null),
+      });
+      return;
+    }
+
+    const datei = dateiImVorhaben(ordner, koerper.datei);
+    if (datei.fehler) { sende(res, 400, { error: datei.fehler }); return; }
+    const { name, ziel } = datei;
+
+    const text = String(koerper.text == null ? '' : koerper.text)
+      .slice(0, MAX_INHALT * 50);
+
+    // Dieselbe Basisprüfung wie in der alten Ablage, nur im Repository des
+    // Vorhabens: eine vorhandene, gefasste Datei verlangt die Basis; eine
+    // neue, noch nicht gefasste darf ohne sie angelegt werden.
+    const aktuelleBasis = dateiBasis(ordner, name, ordner);
+    const hatBasis = Object.prototype.hasOwnProperty.call(koerper, 'basis');
+    const rohBasis = hatBasis ? koerper.basis : null;
+    const gewuenschteBasis = rohBasis == null ? null : String(rohBasis).trim() || null;
+    const basisGueltig = gewuenschteBasis === null
+      || /^[0-9a-f]{7,40}$/.test(gewuenschteBasis);
+    const basisFehlt = !hatBasis && aktuelleBasis !== null;
+    if (basisFehlt || (hatBasis && (!basisGueltig || gewuenschteBasis !== aktuelleBasis))) {
+      let neuerText = '';
+      try {
+        neuerText = readFileSync(ziel, 'utf8');
+      } catch {
+        /* Eine noch nicht angelegte Datei hat keinen Text. */
+      }
+      sende(res, 409, {
+        ok: false,
+        error: basisFehlt
+          ? 'Die Basis fehlt — der Stand ist neuer. Nichts wurde geschrieben.'
+          : 'Der Stand ist neuer. Nichts wurde geschrieben.',
+        neu: { text: neuerText, basis: aktuelleBasis },
+      });
+      return;
+    }
+
+    // Atomar: erst daneben schreiben, dann den Namen umhängen.
+    writeFileSync(ziel + '.tmp', text, 'utf8');
+    renameSync(ziel + '.tmp', ziel);
+
+    // Gefasst wird im Vorhaben-Repository, mit der handelnden Person als
+    // Autor. Das Board-Repository bleibt unberührt. Ist der Text unverändert,
+    // gibt es nichts zu fassen — dann bleibt die alte Basis stehen.
+    const autor = autorFassung2();
+    const nachricht = '„' + name + '“ gespeichert'
+      + (koerper.herkunft === 'modell' ? ' (Fassung vom Modell)'
+        : koerper.herkunft === 'zurueck' ? ' (zurück auf eine frühere Fassung)' : '');
+    const lage = git(['status', '--porcelain', '--', name], autor, undefined, ordner);
+    if (!lage.ok) {
+      throw fehlerMit('Das Vorhaben-Repository antwortet nicht: '
+        + kurzZeile(lage.fehler), 500);
+    }
+    if (lage.out.trim()) {
+      const add = git(['add', '--', name], autor, undefined, ordner);
+      if (!add.ok) {
+        throw fehlerMit('Die Datei ließ sich nicht vormerken: '
+          + kurzZeile(add.fehler), 500);
+      }
+      const commit = git(['commit', '-m', nachricht, '--', name],
+        autor, undefined, ordner);
+      if (!commit.ok) {
+        throw fehlerMit('Die Datei ließ sich nicht fassen: '
+          + kurzZeile(commit.fehler), 500);
+      }
+    }
+
+    // Die neue Basis ist die Fassung dieser Datei; sie geht mit zurück.
+    const neueBasis = dateiBasis(ordner, name, ordner);
+    sende(res, 200, {
+      ok: true, name, laenge: text.length, basis: neueBasis, fassung: neueBasis,
+    });
+  } catch (fehler) {
+    sende(res, (fehler && fehler.status) || 500, {
+      error: String((fehler && fehler.message) || fehler),
+    });
+  }
+}
+
+/* --- Der Umzug aus der alten Ablage --------------------------------------- */
+
+/** Ein GitHub-Name: Buchstabe oder Ziffer am Rand, dazwischen Bindestriche. */
+function istGithubName(wert) {
+  return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(
+    String(wert == null ? '' : wert).trim(),
+  );
+}
+
+/**
+ * Die alte Ablage: das offene Board, wenn es selbst die Fassung 1 ist, sonst
+ * das erste Board der Fassung 1 im Register. Sie wird nur gelesen.
+ */
+function umzugQuelle() {
+  const alte = REGISTER.boards.filter((board) => board && board.format === 1
+    && board.repo && existsSync(board.repo));
+  if (AKTIV && AKTIV.format === 1) {
+    const offen = alte.find((board) => board.id === AKTIV.id);
+    if (offen) return offen;
+  }
+  return alte.find((board) => istHauptboard(board)) || alte[0] || null;
+}
+
+/**
+ * Die vorhandene Zuordnung alte Kennung → GitHub-Name. Genommen wird zuerst
+ * der GitHub-Name aus `identitaet.json` (wenn er zu einer Person passt), dann
+ * einer an der Person selbst, zuletzt der Name, unter dem die Boards der
+ * Fassung 2 im Register stehen. So braucht der Umzug ohne Angabe keine
+ * Eingabe, solange die alte Person irgendwo einen GitHub-Namen hat.
+ */
+function zuordnungAusBestand(board) {
+  const ident = IDENTITAET && typeof IDENTITAET === 'object' ? IDENTITAET : {};
+  const besitzer = REGISTER.boards
+    .filter((eintrag) => eintrag && eintrag.format === 2 && istGithubName(eintrag.person))
+    .map((eintrag) => String(eintrag.person).trim())
+    .find(Boolean) || '';
+  let personen = [];
+  try {
+    personen = liesPersonen(board.repo, board.person);
+  } catch {
+    // Eine Ablage ohne lesbare Personendatei bleibt lesbar.
+  }
+  if (!personen.length) {
+    personen = [{ id: String(board.person || 'p1'), name: String(ident.name || '') }];
+  }
+  const namen = {};
+  for (const person of personen) {
+    const id = String(person.id || '').trim();
+    if (!id) continue;
+    const eigener = String(person.github || '').trim();
+    const gleichnamig = Boolean(ident.name && person.name)
+      && String(person.name).trim().toLowerCase()
+        === String(ident.name).trim().toLowerCase();
+    let name = '';
+    if (gleichnamig && istGithubName(ident.github)) name = String(ident.github).trim();
+    else if (istGithubName(eigener)) name = eigener;
+    else if (personen.length === 1 && istGithubName(ident.github)) {
+      name = String(ident.github).trim();
+    }
+    if (!name && besitzer && besitzer !== id) name = besitzer;
+    if (name) namen[id] = name;
+  }
+  return namen;
+}
+
+/** Die übergebene Zuordnung prüfen; `null` heißt: es gab keine Angabe. */
+function pruefeZuordnung(wert) {
+  if (wert == null) return { ok: true, zuordnung: null };
+  if (typeof wert !== 'object' || Array.isArray(wert)) {
+    return {
+      ok: false,
+      fehler: 'Die Zuordnung ist eine Abbildung von Kennung auf GitHub-Name',
+    };
+  }
+  const eintraege = Object.entries(wert);
+  if (!eintraege.length) return { ok: true, zuordnung: null };
+  const zuordnung = {};
+  for (const [kennung, name] of eintraege) {
+    const id = String(kennung == null ? '' : kennung).trim();
+    if (!id) return { ok: false, fehler: 'Die Zuordnung nennt eine leere Kennung' };
+    if (!istGithubName(name)) {
+      return {
+        ok: false,
+        fehler: 'Kein GitHub-Name für die Kennung „' + id + '“: '
+          + JSON.stringify(name == null ? '' : name),
+      };
+    }
+    zuordnung[id] = String(name).trim();
+  }
+  return { ok: true, zuordnung };
+}
+
+/** Der GitHub-Name für die Person der alten Ablage; ohne ihn kein Lauf. */
+function hostAusZuordnung(zuordnung, board) {
+  const id = String((board && board.person) || 'p1').trim() || 'p1';
+  if (zuordnung[id]) return zuordnung[id];
+  const werte = Object.values(zuordnung);
+  if (werte.length === 1) {
+    zuordnung[id] = werte[0];
+    return werte[0];
+  }
+  return '';
+}
+
+/** Ein neuer, noch nicht vorhandener Zielordner unter `$DSH_HOME/board/umzug`. */
+function umzugZielVorgabe() {
+  const basis = join(HOME, 'board', 'umzug');
+  const stempel = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  let ziel = join(basis, 'umzug-' + stempel);
+  let nummer = 2;
+  while (existsSync(ziel)) {
+    ziel = join(basis, 'umzug-' + stempel + '-' + nummer);
+    nummer += 1;
+  }
+  return ziel;
+}
+
+/** Das Ziel aus der Angabe; ohne Angabe ein neuer Ordner unter dem Home. */
+function pruefeUmzugZiel(wert) {
+  if (wert == null) return { ok: true, ziel: umzugZielVorgabe() };
+  const text = typeof wert === 'string' ? wert.trim() : '';
+  if (!text) {
+    return {
+      ok: false,
+      fehler: 'Das Ziel fehlt: gib den Ordner für die neuen Repositories an '
+        + 'oder lass ihn weg für einen neuen unter $DSH_HOME/board/umzug',
+    };
+  }
+  const ziel = resolve(text);
+  if (existsSync(ziel) && !statSync(ziel).isDirectory()) {
+    return { ok: false, fehler: 'Das Ziel ist kein Ordner: ' + ziel };
+  }
+  return { ok: true, ziel };
+}
+
+/** Liegt `pfad` in `basis` (auch gleich)? */
+function liegtInnen(basis, pfad) {
+  const ab = relative(basis, pfad);
+  return ab === '' || (ab !== '..' && !ab.startsWith('..' + sep) && !ab.startsWith(sep));
+}
+
+/** Die Reihenfolge der Arten in Bericht und Antwort. */
+const UMZUG_ARTEN = ['station', 'workflow', 'vorhaben', 'board'];
+
+const UMZUG_ANKER = {
+  station: 'station.json',
+  workflow: 'workflow.json',
+  vorhaben: 'vorhaben.json',
+  board: 'board.json',
+};
+
+/** Der GitHub-Name, den die Ankerdatei selbst nennt; sonst der des Laufs. */
+function githubAusAnker(art, json, host) {
+  if (art === 'station' && json.host) return String(json.host);
+  if (art === 'workflow' && json.autor) return String(json.autor);
+  if (art === 'board' && Array.isArray(json.personen) && json.personen.length) {
+    const namen = json.personen
+      .map((person) => String((person && person.login) || '')).filter(Boolean);
+    if (namen.length) return namen.join(', ');
+  }
+  if (art === 'vorhaben' && json.verantwortliche
+    && typeof json.verantwortliche === 'object') {
+    const namen = new Set();
+    for (const liste of Object.values(json.verantwortliche)) {
+      for (const wert of Array.isArray(liste) ? liste : []) {
+        const name = String(wert == null ? '' : wert).trim();
+        if (name) namen.add(name);
+      }
+    }
+    if (namen.size) return Array.from(namen).join(', ');
+  }
+  return host;
+}
+
+/**
+ * Ein Repository im Ziel, wie der Bericht es nennt: Art und Name aus seiner
+ * Ankerdatei, GitHub-Name und Sichtbarkeit. Die Sichtbarkeit kommt aus der
+ * Karte, die der Umzug neben die Repositories legt.
+ */
+function umzugRepoBild(ordner, host) {
+  const repo = basename(ordner);
+  for (const art of UMZUG_ARTEN) {
+    const pfad = join(ordner, UMZUG_ANKER[art]);
+    if (!existsSync(pfad)) continue;
+    try {
+      const json = JSON.parse(readFileSync(pfad, 'utf8'));
+      const name = art === 'workflow'
+        ? String(json.titel || '')
+        : String(json.name || '');
+      return {
+        repo,
+        pfad: ordner,
+        art,
+        name,
+        github: githubAusAnker(art, json, host),
+        sichtbarkeit: sichtbarkeitVon(HOME, ordner),
+        stand: '',
+        fehler: '',
+      };
+    } catch (fehler) {
+      return {
+        repo,
+        pfad: ordner,
+        art,
+        name: '',
+        github: host,
+        sichtbarkeit: sichtbarkeitVon(HOME, ordner),
+        stand: '',
+        fehler: kurzZeile(fehler),
+      };
+    }
+  }
+  return {
+    repo,
+    pfad: ordner,
+    art: '',
+    name: '',
+    github: host,
+    sichtbarkeit: sichtbarkeitVon(HOME, ordner),
+    stand: '',
+    fehler: 'Keine Ankerdatei',
+  };
+}
+
+/** Alle Repositories eines Ziels: Station, Workflow, Vorhaben, Board. */
+function umzugRepositories(ziel, host) {
+  let ordner = [];
+  try {
+    ordner = readdirSync(ziel, { withFileTypes: true })
+      .filter((eintrag) => eintrag.isDirectory())
+      .map((eintrag) => join(ziel, eintrag.name));
+  } catch {
+    return [];
+  }
+  const rang = (art) => (UMZUG_ARTEN.includes(art)
+    ? UMZUG_ARTEN.indexOf(art)
+    : UMZUG_ARTEN.length);
+  return ordner
+    .map((pfad) => umzugRepoBild(pfad, host))
+    .sort((a, b) => rang(a.art) - rang(b.art) || a.repo.localeCompare(b.repo, 'de'));
+}
+
+/** Die Zuordnung und die Repositories an den Bericht des Umzugs hängen. */
+function ergaenzeUmzugBericht(pfad, { zuordnung, repositories }) {
+  const zeilen = ['', '## Zuordnung', ''];
+  for (const [kennung, name] of Object.entries(zuordnung)) {
+    zeilen.push('- `' + kennung + '` → `' + name + '`');
+  }
+  zeilen.push('', '## Repositories (' + repositories.length + ')', '');
+  for (const eintrag of repositories) {
+    const teile = [
+      '`' + eintrag.repo + '`',
+      eintrag.name || eintrag.repo,
+      '`' + eintrag.github + '`',
+      eintrag.sichtbarkeit || 'unbekannt',
+      eintrag.stand,
+    ];
+    if (eintrag.fehler) teile.push('Fehler: ' + eintrag.fehler);
+    zeilen.push('- ' + teile.join(' — '));
+  }
+  zeilen.push('');
+  appendFileSync(pfad, zeilen.join('\n'), 'utf8');
 }
 
 export const inject = ['webServer'];
 
 export function apply(ctx) {
+  // Eine frische Installation bekommt ihr Hauptboard, bevor die Routen
+  // dienen. Ein vorhandenes Register mit anderen Boards bleibt unangetastet;
+  // ein gescheiterter Versuch darf beim nächsten Start ersetzt werden. Der
+  // Zustand wird übernommen, damit die Seite ihn schon beim ersten Lesen sieht.
+  try {
+    const register = sicherstellen({ home: HOME });
+    REGISTER.boards = register.boards;
+    REGISTER.aktiv = register.aktiv;
+    const offen = REGISTER.boards.find((b) => b.id === REGISTER.aktiv) || null;
+    AKTIV = offen;
+    PERSON_ID = offen ? offen.person : '';
+    REPO = offen ? offen.repo : '';
+    VORGANG_DIR = REPO ? join(REPO, 'vorgaenge') : '';
+  } catch (fehler) {
+    console.warn('Board: Hauptboard beim Start nicht eingerichtet: '
+      + String((fehler && fehler.message) || fehler));
+  }
   // Lesen bleibt immer möglich. Ein Schreiben geht durch dieselbe Prüfung:
   // Nennt die Ablage eine andere Fassung als dieses Programm, antwortet die
   // Route mit 409 und rührt keine Datei an. Ausgenommen sind nur Wege, die
@@ -1683,7 +3524,39 @@ export function apply(ctx) {
     '/board/boards',
     '/board/boards/wechsel',
     '/board/boards/entfernen',
+    // Ein Board ins Register legen und öffnen schreibt keine Ablagedatei des
+    // offenen Boards — auch dann nicht, wenn dieses ein Archiv ist.
+    '/board/board/verbinden',
+    '/board/hauptboard/holen',
+    // Ein eigenes Board entsteht außerhalb der offenen Ablage; die Prüfung
+    // des offenen Boards gilt für seine Dateien nicht.
+    '/board/uebernehmen',
+    // Der Umzug schreibt die getrennten Repositories unter ein Ziel außerhalb
+    // der alten Ablage; er fasst keine Ablagedatei des offenen Boards an.
+    '/board/umzug',
     '/board/identitaet',
+    '/board/darstellung',
+    '/board/github/token',
+    // Ein Beitrag ist ein Pull Request, kein Schreiben in die Ablage.
+    '/board/github/beitrag',
+    // Fork und Frage sind Handlungen bei GitHub, keine Ablagedateien.
+    '/board/github/fork',
+    '/board/github/frage',
+  ]);
+
+  // Im Archiv bleibt nur, was kein Schreiben in die alte Ablage ist: der
+  // Wechsel auf ein anderes Board (Lesen), das Entfernen aus dem Register und
+  // die Identität, die außerhalb der Ablage liegt. Alles andere antwortet mit
+  // 403, bevor der Handler die Ablage anfasst.
+  const ARCHIV_ERLAUBT = new Set([
+    '/board/boards/wechsel',
+    '/board/boards/entfernen',
+    '/board/board/verbinden',
+    '/board/identitaet',
+    '/board/darstellung',
+    // Der Umzug liest das Archiv und schreibt daneben; das Archiv selbst
+    // bleibt unverändert.
+    '/board/umzug',
   ]);
 
   function registriere(route) {
@@ -1691,6 +3564,11 @@ export function apply(ctx) {
     return ctx.webServer.register({
       ...route,
       handler(req, res) {
+        if (req.method !== 'GET' && istArchiv(AKTIV)
+          && !ARCHIV_ERLAUBT.has(route.path)) {
+          sende(res, 403, { error: 'Die alte Ablage ist Archiv' });
+          return undefined;
+        }
         if (req.method !== 'GET' && !OHNE_ABLAGE_SCHREIBEN.has(route.path)) {
           try {
             pruefeFormatVorSchreiben();
@@ -1709,12 +3587,46 @@ export function apply(ctx) {
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/data',
-    handler: (req, res) => {
+    handler: async (req, res) => {
       try {
-        if (!REPO) {
+        // Das Hauptboard steht im Register, sein Ordner kann aber fehlen:
+        // ohne Netz wurde nichts geholt. Die Seite bleibt bedienbar und sieht
+        // ein leeres Board mit dem Grund; sie stürzt nicht ab.
+        const hauptboardFehlt = Boolean(AKTIV && AKTIV.format === 2
+          && istHauptboard(AKTIV) && !existsSync(join(REPO, 'board.json')));
+        if (!REPO || hauptboardFehlt) {
           const leer = datenAntwort(leeresBoard());
-          leer.leer = true;
+          leer.leer = !AKTIV;
+          if (hauptboardFehlt) {
+            leer.fehler = AKTIV.fehler || 'nicht geholt';
+            leer.format = 2;
+            leer.formatAblage = 2;
+            leer.sichtbarkeit = AKTIV.sichtbarkeit || sichtbarkeitVon(HOME, REPO);
+          }
           sende(res, 200, leer);
+          return;
+        }
+        // Ein Board der Fassung 2 liegt als viele Repositories da; sein Bild
+        // entsteht in der Komposition, samt dem Stand je Repository. Hier wird
+        // nichts geholt: der Abgleich läuft auf Anstoß über /board/sync.
+        if (AKTIV && AKTIV.format === 2) {
+          const board = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+          const schnell = darfSchnell();
+          // Der einfache Fall antwortet sofort: kein Netz für das Schreibrecht
+          // und keines für den Eigentümer nötig.
+          const eigentuemer = eigentuemerBildSchnell(board);
+          if (schnell !== null && eigentuemer) {
+            sende(res, 200, { ...fassung2Bild(board, schnell), ...eigentuemer });
+            return;
+          }
+          // Mit Remote und Token entscheidet die Berechtigung bei GitHub; ein
+          // fehlender Login wird dort einmal erfragt.
+          const recht = schnell === null ? await schreibrechtFuerBoard() : schnell;
+          const antwort = fassung2Bild(board, recht);
+          // Der Eigentümer gehört zum Bild: gesetzt aus `board.json`, sonst
+          // die Anmeldung, sonst leer mit Hinweis.
+          Object.assign(antwort, eigentuemer || await eigentuemerBild(board));
+          sende(res, 200, antwort);
           return;
         }
         // Vor dem Lesen holen — höchstens einmal je Minute, und ein
@@ -1751,13 +3663,32 @@ export function apply(ctx) {
   }));
 
   // Der Abgleich von Hand: holen, die eigenen Fassungen darauf legen und
-  // weitergeben. Die Antwort sagt, was davon gelungen ist.
+  // weitergeben. Die Antwort sagt, was davon gelungen ist. Ein Board der
+  // Fassung 2 hat viele Repositories: jedes wird für sich abgeglichen, ein
+  // Fehler bleibt an seinem Repository, und die Antwort bleibt eine Karte.
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/sync',
     handler: async (req, res) => {
       if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
       try {
+        if (AKTIV && AKTIV.format === 2) {
+          const board = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+          const staende = gleicheAlleAb(board.staende, {
+            home: HOME,
+            autor: autorFassung2(),
+          });
+          const lage = zusammenfassen(staende).lage;
+          sende(res, 200, {
+            // Für die alte Form: ob mindestens ein Repository geholt und
+            // wieder geschickt wurde. Der Stand je Repository steht daneben.
+            geholt: staende.some((eintrag) => eintrag.lage === 'abgeglichen'),
+            gegeben: staende.some((eintrag) => eintrag.lage === 'abgeglichen'),
+            lage,
+            staende,
+          });
+          return;
+        }
         sende(res, 200, abgleichen());
       } catch (error) {
         sende(res, 500, { error: String((error && error.message) || error) });
@@ -1773,7 +3704,27 @@ export function apply(ctx) {
     path: '/board/boards',
     handler: async (req, res) => {
       if (req.method === 'GET') {
-        sende(res, 200, { ...registerFuerSeite(), identitaet: IDENTITAET });
+        // Die Anzeige braucht mehr als den Namen: Besitzer, Verweise und den
+        // Stand. Gelesen wird je Board einmal; die Schreibwege antworten
+        // weiter mit der schlanken Liste aus `registerFuerSeite`.
+        const seite = registerFuerSeite();
+        seite.boards = seite.boards.map((eintrag) => {
+          const board = REGISTER.boards.find((b) => b.id === eintrag.id);
+          if (!board) return { ...eintrag, repo: '' };
+          const kennzahlen = kennzahlenVon(board, HOME);
+          return {
+            ...eintrag,
+            repo: board.repo,
+            // Die Sichtbarkeit steht an jedem Board: öffentlich oder privat.
+            // Das Hauptboard trägt sie im Register, weil sein Ordner fehlen
+            // kann; sonst wird sie aus seiner Umgebung gelesen.
+            sichtbarkeit: board.sichtbarkeit || sichtbarkeitVon(HOME, board.repo),
+            ...kennzahlen,
+            // „nicht geholt“ bleibt der Grund, auch wenn der Ordner fehlt.
+            ...(board.fehler ? { fehler: board.fehler } : null),
+          };
+        });
+        sende(res, 200, { ...seite, identitaet: IDENTITAET });
         return;
       }
       if (req.method !== 'POST') { sende(res, 405, { error: 'Nur GET oder POST' }); return; }
@@ -1798,6 +3749,255 @@ export function apply(ctx) {
     },
   }));
 
+  // Das Hauptboard erneut holen. Der Weg räumt nur einen leeren oder halb
+  // geklonten Zielordner; danach steht der Eintrag neu im Register. Ein
+  // Fehlschlag antwortet weiter mit 200 und nennt den Grund — die Seite bleibt
+  // bedienbar und kann es später erneut versuchen.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/hauptboard/holen',
+    handler: (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const { board, fehler, register, verweise } = wiederholen({ home: HOME });
+        if (register) {
+          REGISTER.boards = register.boards;
+          REGISTER.aktiv = register.aktiv;
+          setzeAktiv(register.aktiv);
+        }
+        sende(res, 200, {
+          board: board || null,
+          fehler: fehler || '',
+          ...(verweise ? { verweise } : null),
+        });
+      } catch (error) {
+        sende(res, 500, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // Der Katalog des Hauptboards: die kuratierten öffentlichen Dinge und die
+  // gefundenen Stationen mit Sternen, Fassung, Host und Verweis. `kuratiert`
+  // und `gefunden` sind die beiden Teile, `eintraege` die zusammengeführte
+  // Liste. Gelesen wird aus dem Hauptboard im Register, nicht aus dem offenen
+  // Board; ohne Hauptboard bleibt die Antwort leer und sagt warum.
+  // `frisch=1` umgeht den Zwischenspeicher und erzwingt die Suche.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/katalog',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const suche = String(frage.get('suche') == null ? '' : frage.get('suche'));
+        const frisch = ['1', 'true', 'ja'].includes(
+          String(frage.get('frisch') == null ? '' : frage.get('frisch')).toLowerCase(),
+        );
+        const haupt = hauptboardFuerKatalog();
+        if (!haupt) {
+          sende(res, 200, {
+            eintraege: [], kuratiert: [], gefunden: [], hinweis: 'Kein Hauptboard',
+            stand: null, standGefunden: null,
+          });
+          return;
+        }
+        const gesammelt = await sammleKatalog({
+          hauptboard: haupt.repo,
+          home: HOME,
+          client: erstelleClient({ home: HOME }),
+          frisch,
+        });
+        sende(res, 200, {
+          eintraege: sucheKatalog(gesammelt.eintraege, suche),
+          kuratiert: sucheKatalog(gesammelt.kuratiert, suche),
+          gefunden: sucheKatalog(gesammelt.gefunden, suche),
+          hinweis: gesammelt.hinweis || '',
+          stand: gesammelt.stand || null,
+          standGefunden: gesammelt.standGefunden || null,
+          luecken: Array.isArray(gesammelt.luecken) ? gesammelt.luecken : [],
+        });
+      } catch (error) {
+        sende(res, 500, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // Das Probeprojekt in ein eigenes Board übernehmen. Das Original wird nur
+  // gelesen; Board und Kopie entstehen als eigene Repositories unter den
+  // Ablagen, werden aufgenommen und geöffnet. Ohne eigenen Namen gibt es kein
+  // Ziel — die Antwort nennt, was fehlt.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/uebernehmen',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        const wer = IDENTITAET || {};
+        const name = String(
+          koerper.name != null && String(koerper.name).trim()
+            ? koerper.name
+            : (wer.name || ''),
+        ).trim().slice(0, 40);
+        if (!name) { sende(res, 409, { fehlt: 'name' }); return; }
+
+        const haupt = hauptboardFuerKatalog();
+        if (!haupt) {
+          sende(res, 409, { error: 'Es gibt kein Hauptboard im Register' });
+          return;
+        }
+        let hauptboard;
+        try {
+          hauptboard = liesBoardFassung2(haupt.repo);
+        } catch (fehler) {
+          sende(res, 409, {
+            error: 'Das Hauptboard ist nicht lesbar: ' + kurzZeile(fehler),
+          });
+          return;
+        }
+
+        const genannt = String(koerper.repo == null ? '' : koerper.repo).trim();
+        const quelle = genannt ? resolve(genannt) : probeprojektDesHauptboards();
+        if (!quelle) {
+          sende(res, 404, {
+            error: 'Das Probeprojekt des Hauptboards wurde nicht gefunden',
+          });
+          return;
+        }
+        if (!existsSync(join(quelle, 'vorhaben.json'))) {
+          sende(res, 400, { error: 'Der Ordner ist kein Vorhaben: ' + quelle });
+          return;
+        }
+        let roh;
+        let vorhaben;
+        try {
+          roh = JSON.parse(readFileSync(join(quelle, 'vorhaben.json'), 'utf8'));
+          vorhaben = liesVorhaben(quelle);
+        } catch (fehler) {
+          sende(res, 400, {
+            error: 'Das Vorhaben ist nicht lesbar: ' + kurzZeile(fehler),
+          });
+          return;
+        }
+
+        // Der Workflow der Kopie zeigt auf das Original, nicht in die Kopie.
+        // Liegt er als `owner/name` im Zwischenspeicher, gilt dieser Ort.
+        const workflowPfad = lokalerOrt(vorhaben.workflow.repo, quelle);
+        const workflowOrt = workflowPfad && existsSync(workflowPfad)
+          ? workflowPfad
+          : ortImRepo(vorhaben.workflow.repo, quelle);
+        if (!workflowOrt || !existsSync(workflowOrt)) {
+          sende(res, 409, {
+            error: 'Der Workflow des Vorhabens liegt nicht lokal: '
+              + vorhaben.workflow.repo,
+          });
+          return;
+        }
+
+        const boardName = String(koerper.boardName == null ? '' : koerper.boardName)
+          .trim().slice(0, 60) || (name + 's Board');
+        const boardId = freieBoardKennung(boardName);
+        const boardOrdner = join(HOME, 'board', 'ablagen', boardId);
+
+        // Die eigene Person auf dem neuen Board: der Login, wenn es einen
+        // gibt; sonst die Kennung, unter der das Board liegt.
+        const login = String(wer.github || '').trim() || boardId;
+        const personFarbe = /^#[0-9a-f]{6}$/i.test(String(wer.farbe || ''))
+          ? String(wer.farbe) : '#fbbf24';
+
+        const kopieId = vorhaben.id + '-kopie';
+        const kopieOrdner = join(boardOrdner, 'vorhaben-' + kopieId);
+        mkdirSync(boardOrdner, { recursive: true });
+        kopiereOrdner(quelle, kopieOrdner, null, new Set(['vorhaben.json']));
+
+        // Der Stand des Originals; ein Tag benennt die Fassung, sonst bleibt
+        // sie leer, statt eine Zahl zu erfinden.
+        const marke = git(['describe', '--tags', '--abbrev=0'], null, 5000, quelle);
+        const quellFassung = marke.ok && marke.out.trim() ? marke.out.trim() : '';
+
+        // Ein Verweis im neuen Board: `owner/name`, wenn das Repository einen
+        // GitHub-Remote hat; sonst der Ordnername. Was sich hier nicht
+        // auflösen lässt, bleibt, wie es ist — nur ein toter, absoluter Pfad
+        // wird zum Ordnernamen, damit kein neuer Verweis einen Pfad trägt.
+        const alsVerweis = (wert, basis) => {
+          const text = String(wert == null ? '' : wert).trim();
+          if (!text) return '';
+          const ort = lokalerOrt(text, basis);
+          if (ort && existsSync(ort)) return verweisFuerRepo(ort);
+          const zwischen = ortImRepo(text, basis);
+          if (zwischen && existsSync(zwischen)) return verweisFuerRepo(zwischen);
+          return text.startsWith('/') ? basename(text) : text;
+        };
+
+        const kopie = {
+          ...roh,
+          id: kopieId,
+          name: vorhaben.name,
+          workflow: { ...roh.workflow, repo: verweisFuerRepo(workflowOrt) },
+          verantwortliche: Object.fromEntries(
+            Object.keys(vorhaben.verantwortliche).map((stelle) => [stelle, [login]]),
+          ),
+          fork_von: {
+            repo: basename(quelle),
+            ...(quellFassung ? { fassung: quellFassung } : null),
+          },
+        };
+        writeFileSync(join(kopieOrdner, 'vorhaben.json'),
+          JSON.stringify(kopie, null, 2) + '\n', 'utf8');
+
+        // Das Board: eigene Kennung, eigene Person. Workflows und Stationen
+        // bleiben Verweise auf die Repositories des Hauptboards; geschrieben
+        // werden sie als `owner/name`, wo ein GitHub-Remote bekannt ist.
+        const boardDaten = {
+          format: 2,
+          id: boardId,
+          name: boardName,
+          art: 'lokal',
+          personen: [{ login, name, farbe: personFarbe }],
+          workflows: hauptboard.workflows.map((verweis) => ({
+            repo: alsVerweis(verweis.repo, haupt.repo),
+            fassung: verweis.fassung,
+          })),
+          vorhaben: [{ repo: verweisFuerRepo(kopieOrdner) }],
+          stationen: hauptboard.stationen.map((verweis) => ({
+            repo: alsVerweis(verweis.repo, haupt.repo),
+          })),
+          einstellungen: {},
+          layout: {},
+        };
+        writeFileSync(join(boardOrdner, 'board.json'),
+          JSON.stringify(boardDaten, null, 2) + '\n', 'utf8');
+        // Die Kopie ist ein eigenes Repository; im Board-Repository steht nur
+        // der Verweis, nicht ihre Geschichte. Das hält beide getrennt.
+        writeFileSync(join(boardOrdner, '.gitignore'), 'vorhaben-*/\n', 'utf8');
+
+        const autor = [
+          name,
+          wer.github ? wer.github + '@users.noreply.github.com' : 'board@local',
+        ];
+        legeRepoAn(boardOrdner, 'Board „' + boardName + '“ angelegt', autor);
+        legeRepoAn(kopieOrdner, 'Vorhaben „' + vorhaben.name + '“ übernommen', autor);
+
+        const aufgenommen = nimmBoardAuf(HOME, {
+          pfad: boardOrdner,
+          person: login,
+        });
+        REGISTER.boards = aufgenommen.register.boards;
+        REGISTER.aktiv = aufgenommen.register.aktiv;
+        setzeAktiv(aufgenommen.register.aktiv);
+
+        sende(res, 200, {
+          board: aufgenommen.board,
+          vorhaben: { ...kopie, repo: kopieOrdner },
+        });
+      } catch (error) {
+        sende(res, (error && error.status) || 400, {
+          error: String((error && error.message) || error),
+        });
+      }
+    },
+  }));
+
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/boards/wechsel',
@@ -1808,7 +4008,11 @@ export function apply(ctx) {
         const id = String(koerper.id == null ? '' : koerper.id);
         const board = REGISTER.boards.find((b) => b.id === id);
         if (!board) { sende(res, 404, { error: 'Dieses Board steht nicht im Register' }); return; }
-        if (!existsSync(join(board.repo, 'format'))) {
+        // Ein Board der Fassung 1 trägt seine Fassung in der Datei „format“;
+        // ein Board der Fassung 2 trägt sie in `board.json`. Fehlt die Datei,
+        // ist der Ordner nicht (mehr) da — der Wechsel rührt nichts an.
+        const marke = board.format === 2 ? 'board.json' : 'format';
+        if (!existsSync(join(board.repo, marke))) {
           sende(res, 409, { error: 'Der Ordner dieses Boards fehlt: ' + board.repo });
           return;
         }
@@ -1835,7 +4039,287 @@ export function apply(ctx) {
         setzeAktiv(register.aktiv);
         sende(res, 200, { ok: true, ...registerFuerSeite() });
       } catch (error) {
-        sende(res, 400, { error: String((error && error.message) || error) });
+        sende(res, (error && error.status) || 400, {
+          error: String((error && error.message) || error),
+        });
+      }
+    },
+  }));
+
+  // Das offene Board selbst: Registereintrag, Format, Art, Sichtbarkeit und
+  // Schreibrecht. Die Fläche bleibt weg — wer sie braucht, liest `/board/data`.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/board',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      if (!AKTIV || !REPO) { sende(res, 404, { error: 'Noch kein Board verbunden' }); return; }
+      try {
+        sende(res, 200, await offenesBoardBild());
+      } catch (error) {
+        sende(res, 500, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // Ein Board ins Register legen und sofort öffnen — derselbe Weg wie
+  // `/board/boards`, mit `repo` als zweitem Namen für den Ordner. Die Antwort
+  // ist das Bild des offenen Boards, wie es `/board/data` liest.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/board/verbinden',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        const wunschRepo = String(koerper.repo == null ? '' : koerper.repo).trim();
+        const adresse = String(koerper.adresse == null ? '' : koerper.adresse).trim();
+        const wert = wunschRepo || adresse;
+        if (!wert) {
+          sende(res, 400, { error: 'Es fehlt „repo“ oder „adresse“' });
+          return;
+        }
+        if (!IDENTITAET || !IDENTITAET.name) {
+          sende(res, 400, { error: 'Bitte zuerst den eigenen Namen eintragen' });
+          return;
+        }
+        // Ein unbekannter Ordner wird nicht angelegt: dieser Weg verbindet,
+        // was schon da ist. Ein vorhandener, leerer Ordner darf ein neues
+        // Board bekommen — wie bei `/board/boards`.
+        const istAdresse = /^(https?:\/\/|file:\/\/|git@|ssh:\/\/|git:\/\/)/i.test(wert);
+        if (!istAdresse) {
+          const ort = resolve(wert);
+          if (!existsSync(ort)) {
+            sende(res, 404, { error: 'Diesen Ordner gibt es nicht: ' + ort });
+            return;
+          }
+          const eintraege = readdirSync(ort).filter((name) => name !== '.git');
+          const alsBoard2 = existsSync(join(ort, 'board.json'));
+          const alsBoard1 = existsSync(join(ort, 'format'));
+          if (!alsBoard2 && !alsBoard1 && eintraege.length) {
+            sende(res, 409, { error: 'Dieser Ordner ist kein Board: ' + ort });
+            return;
+          }
+        }
+        const { board, register } = verbindeBoard({
+          home: HOME,
+          name: String(koerper.name == null ? '' : koerper.name),
+          adresse: wert,
+          identitaet: IDENTITAET,
+        });
+        REGISTER.boards = register.boards;
+        REGISTER.aktiv = register.aktiv;
+        setzeAktiv(board.id);
+        sende(res, 200, await bildDesOffenenBoards());
+      } catch (error) {
+        const text = String((error && error.message) || error);
+        // Eine Adresse, die sich nicht holen lässt, ist nicht gefunden; ein
+        // Ordner, der nicht zum Board taugt, ist ein Widerspruch.
+        const status = Number(error && error.status)
+          || (/ließ sich nicht holen|nicht erreichbar|Adresse/i.test(text) ? 404 : 409);
+        sende(res, status, { error: text });
+      }
+    },
+  }));
+
+  // Der Workflow des offenen Boards: Verweis, Fassung, Stationen und
+  // Positionen, soweit lesbar. Ohne Workflow antwortet der Weg 409 mit Grund.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/workflow',
+    handler: (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      if (!AKTIV || !REPO) { sende(res, 404, { error: 'Noch kein Board verbunden' }); return; }
+      try {
+        const { status, daten } = workflowDesOffenenBoards();
+        sende(res, status, daten);
+      } catch (error) {
+        sende(res, 500, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // Der Umzug aus der alten Ablage: Sie wird nur gelesen; geschrieben wird
+  // unter dem Ziel. Ohne Ziel entsteht ein neuer Ordner unter
+  // `$DSH_HOME/board/umzug`. Ein Ziel, das schon etwas enthält, wird nicht
+  // überschrieben — die Antwort nennt, was dort liegt.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/umzug',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        // Der Umzug schreibt außerhalb der offenen Ablage; das Schreibrecht
+        // des offenen Boards entscheidet trotzdem, ob geschrieben werden darf.
+        const recht = await schreibrechtFuerBoard();
+        if (recht.darf !== true) {
+          sende(res, 403, {
+            error: String(recht.grund || 'Kein Schreibrecht für dieses Board.'),
+            ...(recht.hinweis ? { hinweis: recht.hinweis } : null),
+          });
+          return;
+        }
+        const board = umzugQuelle();
+        if (!board) {
+          sende(res, 400, {
+            error: 'Keine alte Ablage im Register: es gibt kein Board der Fassung 1.',
+          });
+          return;
+        }
+        const quelle = resolve(board.repo);
+        try {
+          if (readFileSync(join(quelle, 'format'), 'utf8').trim() !== '1') {
+            sende(res, 400, { error: 'Die alte Ablage nennt nicht Format 1: ' + quelle });
+            return;
+          }
+        } catch (fehler) {
+          sende(res, 400, {
+            error: 'Die alte Ablage ist nicht lesbar: ' + kurzZeile(fehler),
+          });
+          return;
+        }
+
+        const koerper = await leseKoerper(req);
+        const bestand = pruefeZuordnung(koerper.zuordnung);
+        if (!bestand.ok) { sende(res, 400, { error: bestand.fehler }); return; }
+        // Ohne Angabe gilt die vorhandene Abbildung; sie steht in der Antwort,
+        // bevor der Lauf beginnt.
+        const zuordnung = bestand.zuordnung || zuordnungAusBestand(board);
+        const host = hostAusZuordnung(zuordnung, board);
+        if (!host) {
+          sende(res, 400, {
+            error: 'Für die Kennung „' + String(board.person || 'p1')
+              + '“ fehlt der GitHub-Name; gib die Zuordnung mit.',
+            zuordnung,
+          });
+          return;
+        }
+
+        const zielWahl = pruefeUmzugZiel(koerper.ziel);
+        if (!zielWahl.ok) {
+          sende(res, 400, { error: zielWahl.fehler, zuordnung });
+          return;
+        }
+        const ziel = zielWahl.ziel;
+        if (liegtInnen(quelle, ziel)) {
+          sende(res, 400, {
+            error: 'Das Ziel liegt in der alten Ablage; die bleibt unverändert: ' + ziel,
+            zuordnung,
+          });
+          return;
+        }
+        if (liegtInnen(ziel, quelle)) {
+          sende(res, 400, {
+            error: 'Die alte Ablage liegt im Ziel: ' + ziel,
+            zuordnung,
+          });
+          return;
+        }
+
+        const quelleBild = { id: board.id, name: board.name, repo: quelle };
+        // Erst sehen, was im Ziel liegt: Ein vorhandenes, nicht leeres Ziel
+        // wird nicht überschrieben. Die Antwort nennt die vorhandenen.
+        let vorhanden = [];
+        try {
+          if (existsSync(ziel)) vorhanden = readdirSync(ziel);
+        } catch (fehler) {
+          sende(res, 400, {
+            error: 'Das Ziel ist nicht lesbar: ' + kurzZeile(fehler),
+            zuordnung,
+          });
+          return;
+        }
+        if (vorhanden.length) {
+          const repositories = umzugRepositories(ziel, host)
+            .map((eintrag) => ({ ...eintrag, stand: 'übersprungen' }));
+          const bericht = join(ziel, 'umzug.md');
+          sende(res, 200, {
+            ok: true,
+            quelle: quelleBild,
+            ziel,
+            zuordnung,
+            host,
+            bericht: existsSync(bericht) ? bericht : '',
+            hinweis: 'Das Ziel ist nicht leer; es wird nichts überschrieben.',
+            anzahl: {
+              repositories: repositories.length,
+              angelegt: 0,
+              uebersprungen: repositories.length,
+              fehler: repositories.filter((eintrag) => eintrag.fehler).length,
+            },
+            repositories,
+          });
+          return;
+        }
+
+        // Der vorhandene Umzug als eigener Prozess: Er liest die alte Ablage
+        // und schreibt ausschließlich unter das Ziel.
+        const werkzeug = join(dirname(fileURLToPath(import.meta.url)),
+          'werkzeuge', 'umzug2.mjs');
+        if (!existsSync(werkzeug)) {
+          sende(res, 500, { error: 'Das Umzugswerkzeug fehlt: ' + werkzeug });
+          return;
+        }
+        const bericht = join(ziel, 'umzug.md');
+        const lauf = spawnSync(process.execPath, [
+          werkzeug,
+          '--quelle', quelle,
+          '--ziel', ziel,
+          '--host', host,
+          '--bericht', bericht,
+        ], {
+          cwd: dirname(werkzeug),
+          encoding: 'utf8',
+          timeout: 300000,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        });
+        if (lauf.status !== 0) {
+          const grund = String(lauf.stderr || lauf.stdout || '').trim()
+            .split('\n').map((zeile) => zeile.trim()).filter(Boolean).pop()
+            || 'unbekannter Fehler';
+          const repositories = umzugRepositories(ziel, host)
+            .map((eintrag) => ({ ...eintrag, stand: 'angelegt' }));
+          sende(res, 500, {
+            error: 'Der Umzug ist gescheitert: ' + grund,
+            quelle: quelleBild,
+            ziel,
+            zuordnung,
+            host,
+            repositories,
+          });
+          return;
+        }
+
+        const repositories = umzugRepositories(ziel, host)
+          .map((eintrag) => ({ ...eintrag, stand: 'angelegt' }));
+        let hinweis = '';
+        try {
+          ergaenzeUmzugBericht(bericht, { zuordnung, repositories });
+        } catch (fehler) {
+          // Der Umzug ist gelaufen; der Bericht bleibt, wie das Werkzeug ihn
+          // schrieb. Der Hinweis sagt, dass die Zuordnung dort fehlt.
+          hinweis = 'Der Bericht ließ sich nicht ergänzen: ' + kurzZeile(fehler);
+        }
+        sende(res, 200, {
+          ok: true,
+          quelle: quelleBild,
+          ziel,
+          zuordnung,
+          host,
+          bericht,
+          hinweis,
+          anzahl: {
+            repositories: repositories.length,
+            angelegt: repositories.length,
+            uebersprungen: 0,
+            fehler: repositories.filter((eintrag) => eintrag.fehler).length,
+          },
+          repositories,
+        });
+      } catch (fehler) {
+        sende(res, (fehler && fehler.status) || 500, {
+          error: String((fehler && fehler.message) || fehler),
+        });
       }
     },
   }));
@@ -1867,7 +4351,9 @@ export function apply(ctx) {
         }
         IDENTITAET = { name, github, farbe };
         schreibeIdentitaet(HOME, IDENTITAET);
-        if (REPO) {
+        // Die Identität gilt auch im Archiv, liegt aber außerhalb der Ablage.
+        // In ein Archiv wird ihre Personendatei nicht geschrieben.
+        if (REPO && !istArchiv(AKTIV)) {
           try {
             const board = liesBoard();
             const ich = (board.personen || []).find((p) => p.ich);
@@ -1887,26 +4373,802 @@ export function apply(ctx) {
     },
   }));
 
+  // Die Texte des Boards: je Sprache eine Datei neben dem Plugin. Fehlt eine
+  // Sprache, bleibt der deutsche Ausgangstext stehen — die Seite zeigt nie
+  // leere Stellen. Die Sprache selbst wählt das Dashboard.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/sprache',
+    handler: (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const roh = String(frage.get('id') == null ? '' : frage.get('id'))
+          .trim().toLowerCase();
+        const id = roh || 'de';
+        if (!/^[a-z]{2}(-[a-z0-9]+)?$/.test(id)) {
+          sende(res, 400, { error: 'Unbekannte Sprache: ' + (id || 'leer') });
+          return;
+        }
+        let texte = {};
+        try {
+          texte = JSON.parse(readFileSync(
+            new URL('./texte/' + id + '.json', import.meta.url), 'utf8',
+          ));
+        } catch {
+          // Kein Wörterbuch für diese Sprache: der Ausgangstext gilt.
+          texte = {};
+        }
+        sende(res, 200, { id, texte });
+      } catch (error) {
+        sende(res, 400, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // Die Darstellung: die Akzentfarbe des Boards. Sie ist persönlich und gilt
+  // für alle Boards; sie liegt neben der Identität, nicht in `board.json`.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/darstellung',
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        sende(res, 200, { darstellung: liesDarstellung(HOME), akzente: AKZENTE });
+        return;
+      }
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur GET oder POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        const akzent = String(koerper.akzent == null ? '' : koerper.akzent).trim();
+        if (!AKZENTE.includes(akzent)) {
+          sende(res, 400, {
+            error: 'Unbekannter Akzent: ' + (akzent || 'leer') + '. Erlaubt: '
+              + AKZENTE.join(', '),
+          });
+          return;
+        }
+        const wert = schreibeDarstellung(HOME, { akzent });
+        sende(res, 200, { ok: true, darstellung: wert, akzente: AKZENTE });
+      } catch (error) {
+        sende(res, 400, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // GitHub: der Stand der Verbindung und die Metadaten eines Repositories.
+  // Lesen geht ohne Token; der Token wird erst nach `GET /user` gespeichert.
+  // Fehler bleiben in der Antwort stehen, statt die Route abzubrechen.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/stand',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const token = liesToken(HOME);
+        const client = erstelleClient({ home: HOME, token });
+        const repoFrage = String(frage.get('repo') || '').trim();
+
+        if (!repoFrage) {
+          const bekannt = liesLogin(HOME);
+          const stand = { verbunden: false, login: token ? (bekannt || null) : null, grenze: null };
+          if (!token) { sende(res, 200, stand); return; }
+          try {
+            const ich = await client.ich();
+            stand.verbunden = true;
+            stand.login = ich.login || bekannt || null;
+            // Fehlt der Login neben einem vorhandenen Token, wird er hier
+            // nachgetragen — danach braucht `/board/data` kein Netz mehr.
+            if (ich.login && ich.login !== bekannt) {
+              try { schreibeToken(HOME, token, ich.login); } catch { /* Der Token bleibt. */ }
+            }
+            try { stand.grenze = await client.rateGrenze(); } catch { /* weich */ }
+          } catch (fehler) {
+            stand.fehler = String((fehler && fehler.message) || fehler);
+          }
+          sende(res, 200, stand);
+          return;
+        }
+
+        const treffer = repoFrage.match(
+          /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/,
+        );
+        if (!treffer) {
+          sende(res, 400, { error: 'Bitte das Repository als owner/name angeben' });
+          return;
+        }
+        const [, owner, name] = treffer;
+        const antwort = {
+          verbunden: Boolean(token),
+          repo: null,
+          sterne: null,
+          fassung: null,
+          freigaben: [],
+          fehler: null,
+        };
+        try {
+          const daten = await client.repo(owner, name);
+          antwort.repo = daten;
+          antwort.sterne = daten.sterne;
+          try {
+            const freigaben = await client.releases(owner, name);
+            antwort.freigaben = freigaben;
+            antwort.fassung = freigaben.length ? freigaben[0].tag : null;
+          } catch (fehler) {
+            antwort.fehler = String((fehler && fehler.message) || fehler);
+          }
+        } catch (fehler) {
+          antwort.fehler = String((fehler && fehler.message) || fehler);
+        }
+        sende(res, 200, antwort);
+      } catch (fehler) {
+        sende(res, 500, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+  // Die Teams der Organisation: Name, Schlüssel und Mitglieder. Ohne Token
+  // gibt es keine Teams — der Hinweis sagt, warum. Gelesen wird je Team die
+  // Mitgliederliste; das Ergebnis gilt zehn Minuten (wie der Katalog).
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/teams',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const org = String(frage.get('org') || ORGANISATION).trim() || ORGANISATION;
+        if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(org)) {
+          sende(res, 400, { error: 'Die Organisation ist ungültig' });
+          return;
+        }
+        const frisch = frage.get('frisch') === '1';
+        const antwort = await holeTeams(org, { frisch });
+        sende(res, 200, { org, ...antwort });
+      } catch (fehler) {
+        sende(res, 500, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+  // Den Token prüfen und speichern — oder löschen. Ein ungültiger Token wird
+  // nicht abgelegt; die Antwort enthält ihn nie.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/token',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        if (koerper.loeschen === true) {
+          loescheToken(HOME);
+          sende(res, 200, { verbunden: false, login: null });
+          return;
+        }
+        const token = String(koerper.token == null ? '' : koerper.token).trim();
+        if (!token) { sende(res, 400, { error: 'Der Token fehlt' }); return; }
+        const client = erstelleClient({ home: HOME, token });
+        let ich = null;
+        try {
+          ich = await client.ich();
+        } catch (fehler) {
+          if (fehler && fehler.status === 401) {
+            sende(res, 401, { error: 'Token ungültig oder abgelaufen' });
+            return;
+          }
+          sende(res, 502, {
+            error: String((fehler && fehler.message) || 'GitHub nicht erreichbar'),
+          });
+          return;
+        }
+        schreibeToken(HOME, token, ich && ich.login);
+        sende(res, 200, { verbunden: true, login: (ich && ich.login) || null });
+      } catch (fehler) {
+        sende(res, (fehler && fehler.status) || 400, {
+          error: String((fehler && fehler.message) || fehler),
+        });
+      }
+    },
+  }));
+
+  // Die Beiträge eines Dings sind die Pull Requests an seinem Repository.
+  // Gelesen wird ohne Token, solange GitHub das Repository hergibt — bei
+  // einem privaten antwortet es mit 404, und die Antwort bleibt der Verweis
+  // auf GitHub. `kann` sagt, ob ein Token vorliegt und ein Pull Request von
+  // hier aus möglich ist.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/beitraege',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const ziel = githubZielAus(frage.get('repo'));
+        if (ziel.fehler) { sende(res, 400, { error: ziel.fehler }); return; }
+        const repo = ziel.owner + '/' + ziel.name;
+        const adresse = githubAdresse(ziel.owner, ziel.name);
+        const token = liesToken(HOME);
+        const client = erstelleClient({ home: HOME, token });
+        let beitraege;
+        try {
+          beitraege = await client.beitraege(ziel.owner, ziel.name, {
+            state: 'all', frisch: true,
+          });
+        } catch (fehler) {
+          const status = Number(fehler && fehler.status) || 0;
+          if (status === 404) {
+            // Ohne Token ist ein privates Repository nicht zu sehen. Der Weg
+            // über GitHub bleibt: die Adresse steht in der Antwort.
+            sende(res, 200, {
+              repo,
+              adresse,
+              kann: false,
+              beitraege: [],
+              hinweis: 'Nicht lesbar ohne Zugang — auf GitHub öffnen',
+            });
+            return;
+          }
+          sende(res, status === 401 || status === 403 ? status : 502, {
+            error: repo + ': ' + kurzZeile(fehler),
+            repo,
+            adresse,
+          });
+          return;
+        }
+        sende(res, 200, {
+          repo,
+          adresse,
+          kann: Boolean(token),
+          beitraege,
+          hinweis: '',
+        });
+      } catch (fehler) {
+        sende(res, 500, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+  // Ein Beitrag ist ein Pull Request bei GitHub — kein Commit in der Ablage.
+  // Gelesen wird immer frisch: ein gerade zusammengeführter Pull Request
+  // zeigt beim nächsten Öffnen „zusammengeführt“. Anlegen geht nur für ein
+  // Repository, das das offene Board nennt, und nur mit Token und
+  // Schreibrecht; `head` und `base` sind Pflicht, der Zweig wird vorher per
+  // Git geschickt. Ohne Token bleibt der Weg über GitHub.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/beitrag',
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        try {
+          const frage = new URL(req.url, 'http://localhost').searchParams;
+          const ziel = githubZielAus(frage.get('repo'));
+          if (ziel.fehler) { sende(res, 400, { error: ziel.fehler }); return; }
+          const nummer = Number(frage.get('nummer'));
+          if (!Number.isInteger(nummer) || nummer <= 0) {
+            sende(res, 400, { error: 'Die Nummer des Beitrags fehlt' });
+            return;
+          }
+          const repo = ziel.owner + '/' + ziel.name;
+          const adresse = githubAdresse(ziel.owner, ziel.name);
+          const token = liesToken(HOME);
+          const client = erstelleClient({ home: HOME, token });
+          try {
+            const beitrag = await client.pull(ziel.owner, ziel.name, nummer);
+            sende(res, 200, { repo, adresse, kann: Boolean(token), beitrag });
+          } catch (fehler) {
+            const status = Number(fehler && fehler.status) || 0;
+            if (status === 404) {
+              sende(res, 404, {
+                error: 'Beitrag #' + nummer + ' nicht gefunden: ' + repo,
+                repo,
+                adresse,
+                kann: Boolean(token),
+              });
+              return;
+            }
+            sende(res, status === 401 || status === 403 ? status : 502, {
+              error: repo + ': ' + kurzZeile(fehler),
+              repo,
+              adresse,
+            });
+          }
+        } catch (fehler) {
+          sende(res, 500, { error: String((fehler && fehler.message) || fehler) });
+        }
+        return;
+      }
+      if (req.method !== 'POST') {
+        sende(res, 405, { error: 'Nur GET oder POST' });
+        return;
+      }
+      try {
+        const koerper = await leseKoerper(req);
+        const ziel = githubZielAus(koerper.repo);
+        if (ziel.fehler) { sende(res, 400, { error: ziel.fehler }); return; }
+        const repo = ziel.owner + '/' + ziel.name;
+        const adresse = githubAdresse(ziel.owner, ziel.name);
+        // Beschrieben werden nur Repositories, die das offene Board nennt —
+        // in `board.json`, in einem Workflow oder in einem Vorhaben. Ein
+        // lokaler Ordner allein sagt nichts über seine Zugehörigkeit. Die
+        // Prüfung steht vor jedem Aufruf bei GitHub.
+        const pfad = boardPfadFuer(ziel);
+        if (!pfad) {
+          sende(res, 403, { error: 'Repository ' + repo + ' steht nicht im Board' });
+          return;
+        }
+        const token = liesToken(HOME);
+        if (!token) {
+          sende(res, 409, {
+            kann: false,
+            repo,
+            adresse,
+            hinweis: 'Pull Request auf GitHub öffnen',
+          });
+          return;
+        }
+        const titel = String(koerper.titel == null ? '' : koerper.titel).trim();
+        const head = String(koerper.head == null ? '' : koerper.head).trim();
+        const base = String(koerper.base == null ? '' : koerper.base).trim();
+        const text = String(koerper.text == null ? '' : koerper.text);
+        if (!titel) { sende(res, 400, { error: 'Der Titel fehlt' }); return; }
+        if (!head || !base) {
+          sende(res, 400, { error: 'Quellzweig und Zielzweig sind Pflicht' });
+          return;
+        }
+        const client = erstelleClient({ home: HOME, token });
+        let recht = false;
+        try {
+          recht = await darfSchreiben({ pfad, home: HOME, client });
+        } catch {
+          recht = false;
+        }
+        if (!recht) {
+          sende(res, 403, { error: 'Kein Schreibrecht an ' + repo });
+          return;
+        }
+        try {
+          const beitrag = await client.erstellePull(ziel.owner, ziel.name, {
+            titel, text, head, base,
+          });
+          // Kein `festhalten`: der Beitrag ist bei GitHub, nicht in der
+          // Ablage. Die Antwort nennt Nummer und Adresse.
+          sende(res, 200, {
+            nummer: beitrag.nummer,
+            adresse: beitrag.adresse,
+          });
+        } catch (fehler) {
+          const status = Number(fehler && fehler.status) || 0;
+          sende(res, [401, 403, 422].includes(status) ? status : 502, {
+            error: 'Pull Request für ' + repo + ' nicht angelegt: ' + kurzZeile(fehler),
+            repo,
+            adresse,
+          });
+        }
+      } catch (fehler) {
+        sende(res, 400, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+
+  // Die Fragen eines Dings sind die Issues an seinem Repository — ohne Pull
+  // Requests. Gelesen wird ohne Token, solange GitHub das Repository hergibt;
+  // bei einem privaten antwortet es mit 404, und der Verweis bleibt.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/fragen',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const ziel = githubZielAus(frage.get('repo'));
+        if (ziel.fehler) { sende(res, 400, { error: ziel.fehler }); return; }
+        const repo = ziel.owner + '/' + ziel.name;
+        const adresse = githubAdresse(ziel.owner, ziel.name);
+        const token = liesToken(HOME);
+        const client = erstelleClient({ home: HOME, token });
+        try {
+          const fragen = await client.fragen(ziel.owner, ziel.name, {
+            state: 'all', frisch: true,
+          });
+          sende(res, 200, {
+            repo,
+            adresse,
+            kann: Boolean(token),
+            fragen,
+            hinweis: '',
+          });
+        } catch (fehler) {
+          const status = Number(fehler && fehler.status) || 0;
+          if (!token && status === 404) {
+            // Ohne Token ist ein privates Repository nicht zu sehen. Der Weg
+            // über GitHub bleibt: die Adresse steht in der Antwort.
+            sende(res, 200, {
+              repo,
+              adresse,
+              kann: false,
+              fragen: [],
+              hinweis: 'Nicht lesbar ohne Zugang — auf GitHub öffnen',
+            });
+            return;
+          }
+          sende(res, status === 401 || status === 403 ? status : 502, {
+            error: repo + ': ' + kurzZeile(fehler),
+            repo,
+            adresse,
+          });
+        }
+      } catch (fehler) {
+        sende(res, 500, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+  // Eine Frage ist ein Issue bei GitHub — kein Commit in der Ablage. Anlegen
+  // geht nur für ein Repository, das das offene Board nennt, und nur mit
+  // Token; ohne Token bleibt der Weg über GitHub.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/frage',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        const ziel = githubZielAus(koerper.repo);
+        if (ziel.fehler) { sende(res, 400, { error: ziel.fehler }); return; }
+        const repo = ziel.owner + '/' + ziel.name;
+        const adresse = githubAdresse(ziel.owner, ziel.name);
+        // Nur Repositories, die das offene Board nennt — geprüft vor jedem
+        // Aufruf bei GitHub.
+        const pfad = boardPfadFuer(ziel);
+        if (!pfad) {
+          sende(res, 403, { error: 'Repository ' + repo + ' steht nicht im Board' });
+          return;
+        }
+        const token = liesToken(HOME);
+        if (!token) {
+          sende(res, 409, {
+            kann: false,
+            repo,
+            adresse,
+            hinweis: 'Frage auf GitHub stellen',
+          });
+          return;
+        }
+        const titel = String(koerper.titel == null ? '' : koerper.titel).trim();
+        const text = String(koerper.text == null ? '' : koerper.text);
+        if (!titel) { sende(res, 400, { error: 'Der Titel fehlt' }); return; }
+        const client = erstelleClient({ home: HOME, token });
+        try {
+          const frage = await client.erstelleFrage(ziel.owner, ziel.name, {
+            titel, text,
+          });
+          sende(res, 200, { nummer: frage.nummer, adresse: frage.adresse });
+        } catch (fehler) {
+          const status = Number(fehler && fehler.status) || 0;
+          sende(res, [401, 403, 422].includes(status) ? status : 502, {
+            error: 'Frage für ' + repo + ' nicht angelegt: ' + kurzZeile(fehler),
+            repo,
+            adresse,
+          });
+        }
+      } catch (fehler) {
+        sende(res, 400, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+  // Ein Fork ist eine Kopie des Repositories bei GitHub — kein lokaler Klon.
+  // Angelegt wird nur für ein Repository, das das offene Board nennt; ohne
+  // Token bleibt der Weg über GitHub.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/fork',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        const ziel = githubZielAus(koerper.repo);
+        if (ziel.fehler) { sende(res, 400, { error: ziel.fehler }); return; }
+        const repo = ziel.owner + '/' + ziel.name;
+        const adresse = githubAdresse(ziel.owner, ziel.name);
+        const pfad = boardPfadFuer(ziel);
+        if (!pfad) {
+          sende(res, 403, { error: 'Repository ' + repo + ' steht nicht im Board' });
+          return;
+        }
+        const token = liesToken(HOME);
+        if (!token) {
+          sende(res, 409, {
+            kann: false,
+            repo,
+            adresse,
+            hinweis: 'Auf GitHub forken',
+          });
+          return;
+        }
+        const client = erstelleClient({ home: HOME, token });
+        try {
+          const fork = await client.erstelleFork(ziel.owner, ziel.name);
+          sende(res, 200, { fork });
+        } catch (fehler) {
+          const status = Number(fehler && fehler.status) || 0;
+          sende(res, [401, 403, 422].includes(status) ? status : 502, {
+            error: 'Fork für ' + repo + ' nicht angelegt: ' + kurzZeile(fehler),
+            repo,
+            adresse,
+          });
+        }
+      } catch (fehler) {
+        sende(res, 400, { error: String((fehler && fehler.message) || fehler) });
+      }
+    },
+  }));
+
+
+  /**
+   * Gehört dieses Repository zum Board? Die Repositories der Fassung 2 liegen
+   * in der Ablage des Boards: das Board selbst, ein Ordner darunter oder ein
+   * Geschwister neben ihm. Dazu gehört der Zwischenspeicher des Zuhauses unter
+   * `$DSH_HOME/board/cache`. Alles andere ist fremd — es wird beim
+   * Veröffentlichen weder angelegt noch umgehängt.
+   */
+  function gehoertZumBoard(pfad, boardOrt, home = HOME) {
+    const ort = resolve(String(pfad == null ? '' : pfad));
+    const board = resolve(String(boardOrt == null ? '' : boardOrt));
+    if (!ort || !board) return false;
+    // `unter` ist wahr für den Ordner selbst und alles darunter; ein Pfad
+    // außerhalb beginnt mit „..“.
+    const unter = (ordner) => {
+      const wo = resolve(String(ordner == null ? '' : ordner));
+      if (!wo) return false;
+      const rest = relative(wo, ort);
+      return rest === ''
+        || (rest !== '..' && !rest.startsWith('..' + sep) && !isAbsolute(rest));
+    };
+    if (unter(board)) return true;
+    if (unter(dirname(board))) return true;
+    const zwischen = String(home == null ? '' : home).trim();
+    return Boolean(zwischen) && unter(join(zwischen, 'board', 'cache'));
+  }
+
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/github/veroeffentlichen',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      try {
+        const koerper = await leseKoerper(req);
+        const wunsch = String(koerper.board == null ? '' : koerper.board).trim();
+        const eintrag = wunsch
+          ? REGISTER.boards.find((b) => b.id === wunsch) || null
+          : REGISTER.boards.find((b) => b.id === REGISTER.aktiv) || null;
+        if (!eintrag) {
+          sende(res, 404, { error: 'Board nicht gefunden: ' + (wunsch || 'offen') });
+          return;
+        }
+        if (eintrag.format !== 2) {
+          sende(res, 409, {
+            error: 'Nur ein Board der Fassung 2 lässt sich veröffentlichen',
+          });
+          return;
+        }
+        const boardOrt = resolve(eintrag.repo);
+        if (!existsSync(boardOrt)) {
+          sende(res, 409, { error: 'Der Board-Ordner fehlt: ' + boardOrt });
+          return;
+        }
+
+        // Vor dem ersten Schreiben: ein öffentliches Ding darf nur auf
+        // öffentliche verweisen. Eine Lücke bricht ab, bevor ein Remote
+        // entsteht oder ein Repository angelegt wird.
+        const verweise = pruefeVerweise(boardOrt, { home: HOME });
+        if (verweise.luecken.length) {
+          sende(res, 409, {
+            error: 'Öffentlich verweist nur auf Öffentliches',
+            organisation: ORGANISATION,
+            luecken: verweise.luecken,
+          });
+          return;
+        }
+
+        const board = komponiere({
+          repo: boardOrt, person: eintrag.person, home: HOME,
+        });
+        // Je Verweis wird geprüft, ob das Repository zum Board gehört. Nur
+        // die eigenen werden veröffentlicht; ein fremdes wird ausgelassen,
+        // nicht angelegt und nicht umgehängt.
+        const eigene = [];
+        const ausgelassen = [];
+        const gesehen = new Set();
+        for (const stand of Array.isArray(board.staende) ? board.staende : []) {
+          const pfad = String(stand.pfad || '');
+          if (!pfad || gesehen.has(pfad)) continue;
+          gesehen.add(pfad);
+          if (!existsSync(pfad)) {
+            sende(res, 409, { error: 'Repository fehlt: ' + pfad });
+            return;
+          }
+          const repo = {
+            pfad,
+            name: basename(pfad),
+            art: String(stand.art || ''),
+            sichtbarkeit: sichtbarkeitVon(HOME, pfad),
+          };
+          if (!gehoertZumBoard(pfad, boardOrt)) {
+            ausgelassen.push({
+              repo: repo.name,
+              pfad,
+              art: repo.art,
+              grund: 'gehört nicht zu diesem Board',
+            });
+            continue;
+          }
+          eigene.push(repo);
+        }
+        if (!eigene.length) {
+          sende(res, 409, {
+            error: 'Dieses Board hat keine eigenen Repositories',
+            organisation: ORGANISATION,
+            ausgelassen,
+          });
+          return;
+        }
+
+        // Der Anfang jeder Remote-Adresse. In Prüfungen ersetzt
+        // `DSH_GIT_REMOTE_BASIS` den Anfang `git@github.com:`; die
+        // Organisation und der Repository-Name bleiben danach stehen.
+        let basis = String(process.env.DSH_GIT_REMOTE_BASIS || 'git@github.com:').trim();
+        if (!basis) basis = 'git@github.com:';
+        if (!/[:/]$/.test(basis)) basis += '/';
+        const adresse = (name) => basis + ORGANISATION + '/' + name + '.git';
+
+        const token = liesToken(HOME);
+        if (!token) {
+          // Ohne Token wird nichts geschrieben: die Befehle legen die Remotes
+          // von Hand an, die Sichtbarkeit setzt danach GitHub.
+          const befehle = [];
+          for (const repo of eigene) {
+            befehle.push('git -C ' + repo.pfad + ' remote add origin '
+              + adresse(repo.name));
+            befehle.push('git -C ' + repo.pfad + ' push -u origin main --tags');
+          }
+          sende(res, 409, {
+            error: 'Ohne Token keine Veröffentlichung — die Befehle legen die '
+              + 'Remotes von Hand an',
+            organisation: ORGANISATION,
+            befehle,
+            ausgelassen,
+            repositories: eigene.map((repo) => ({
+              repo: repo.name,
+              pfad: repo.pfad,
+              sichtbarkeit: repo.sichtbarkeit,
+              remote: adresse(repo.name),
+            })),
+          });
+          return;
+        }
+
+        const client = erstelleClient({ home: HOME, token });
+        const veroeffentlicht = [];
+        let fehler = '';
+        for (const repo of eigene) {
+          const ziel = ORGANISATION + '/' + repo.name;
+          const privat = repo.sichtbarkeit === 'privat';
+          try {
+            let angelegt = false;
+            try {
+              // Gibt es das Repository schon, wird es verbunden; sonst wird
+              // es angelegt.
+              await client.repo(ORGANISATION, repo.name);
+            } catch (f) {
+              if (!f || f.status !== 404) throw f;
+              await client.erstelleRepo(ORGANISATION, {
+                name: repo.name,
+                privat,
+                beschreibung: repo.art === 'board' ? 'Board' : '',
+              });
+              angelegt = true;
+            }
+
+            const url = adresse(repo.name);
+            const vorhanden = git(['remote', 'get-url', 'origin'],
+              null, undefined, repo.pfad);
+            if (vorhanden.ok && vorhanden.out.trim()) {
+              if (vorhanden.out.trim() !== url) {
+                const gesetzt = git(['remote', 'set-url', 'origin', url],
+                  null, undefined, repo.pfad);
+                if (!gesetzt.ok) {
+                  throw new Error('Remote ließ sich nicht setzen: '
+                    + String(gesetzt.fehler || '').trim());
+                }
+              }
+            } else {
+              const hinzu = git(['remote', 'add', 'origin', url],
+                null, undefined, repo.pfad);
+              if (!hinzu.ok) {
+                throw new Error('Remote ließ sich nicht anlegen: '
+                  + String(hinzu.fehler || '').trim());
+              }
+            }
+
+            const push = git(['push', '-u', 'origin', 'main', '--tags'],
+              null, 120000, repo.pfad);
+            if (!push.ok) {
+              throw new Error('Push scheiterte: '
+                + String(push.fehler || push.out || '').trim());
+            }
+
+            await client.setzeSichtbarkeit(ORGANISATION, repo.name, privat);
+            veroeffentlicht.push({
+              repo: repo.name,
+              pfad: repo.pfad,
+              remote: url,
+              sichtbarkeit: repo.sichtbarkeit,
+              angelegt,
+            });
+          } catch (f) {
+            const grund = String((f && f.message) || f)
+              .split('\n').map((z) => z.trim()).find(Boolean) || 'unbekannt';
+            // Ein Fehler nennt sein Repository und hält an; die bisher
+            // veröffentlichten stehen in der Antwort.
+            fehler = ziel + ': ' + grund;
+            break;
+          }
+        }
+        if (fehler) {
+          sende(res, 502, {
+            error: 'Veröffentlichen hielt an: ' + fehler,
+            organisation: ORGANISATION,
+            veroeffentlicht,
+            ausgelassen,
+            fehler,
+          });
+          return;
+        }
+        sende(res, 200, {
+          ok: true,
+          organisation: ORGANISATION,
+          veroeffentlicht,
+          ausgelassen,
+          fehler: null,
+        });
+      } catch (fehler) {
+        sende(res, (fehler && fehler.status) || 400, {
+          error: String((fehler && fehler.message) || fehler),
+        });
+      }
+    },
+  }));
+
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/doc',
     handler: (req, res) => {
       try {
         const frage = new URL(req.url, 'http://localhost').searchParams;
-        const board = liesBoard();
+        const board = boardFuerDateien();
         const vorgang = (board.vorgaenge || []).find((v) => v.id === frage.get('vorhaben'));
         if (!vorgang) { sende(res, 404, { exists: false, error: 'Vorhaben nicht gefunden' }); return; }
-        const ordner = ordnerVon(vorgang);
+        const ordner = ordnerFuerVorgang(vorgang);
         if (!ordner) { sende(res, 404, { exists: false, error: 'Kein Ordner' }); return; }
         const name = dateiName(frage.get('datei') || '');
         if (!name) { sende(res, 400, { exists: false, error: 'Ungültiger Dateiname' }); return; }
+        // Auch ein Dateiname bleibt im Vorhaben-Repository; der Ordner selbst
+        // wird über `pfadImOrdner` geprüft.
+        if (!pfadImOrdner(ordner, name.replace(/\/$/, ''))) {
+          sende(res, 400, { exists: false, error: 'Ungültiger Dateiname' });
+          return;
+        }
         const inhalt = dateiInhalt(ordner, name);
         // Eine Datei trägt die Fassung mit, auf der sie beim Öffnen steht:
         // den Commit, der sie zuletzt geändert hat. Ein Ordner und eine noch
         // nicht gefasste Datei tragen `null`.
         sende(res, 200, {
           ...inhalt,
-          basis: inhalt.art === 'ordner' ? null : dateiBasis(ordner, name),
+          basis: inhalt.art === 'ordner'
+            ? null
+            : dateiBasis(ordner, name, repoFuerVorgang(ordner)),
         });
       } catch (error) {
         sende(res, 500, { exists: false, error: String((error && error.message) || error) });
@@ -1923,10 +5185,10 @@ export function apply(ctx) {
     handler: (req, res) => {
       try {
         const frage = new URL(req.url, 'http://localhost').searchParams;
-        const board = liesBoard();
+        const board = boardFuerDateien();
         const vorgang = (board.vorgaenge || []).find((v) => v.id === frage.get('vorhaben'));
         if (!vorgang) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
-        const ordner = ordnerVon(vorgang);
+        const ordner = ordnerFuerVorgang(vorgang);
         if (!ordner) { sende(res, 404, { error: 'Kein Ordner' }); return; }
         const pfad = String(frage.get('pfad') || '');
         const ziel = pfadImOrdner(ordner, pfad);
@@ -1977,10 +5239,10 @@ export function apply(ctx) {
     handler: (req, res) => {
       try {
         const frage = new URL(req.url, 'http://localhost').searchParams;
-        const board = liesBoard();
+        const board = boardFuerDateien();
         const vorgang = (board.vorgaenge || []).find((v) => v.id === frage.get('vorhaben'));
         if (!vorgang) { sende(res, 404, { exists: false, error: 'Vorhaben nicht gefunden' }); return; }
-        const ordner = ordnerVon(vorgang);
+        const ordner = ordnerFuerVorgang(vorgang);
         if (!ordner) { sende(res, 404, { exists: false, error: 'Kein Ordner' }); return; }
         const pfad = String(frage.get('pfad') || '');
         const ziel = pfadImOrdner(ordner, pfad);
@@ -2019,6 +5281,12 @@ export function apply(ctx) {
       if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
       try {
         const koerper = await leseKoerper(req);
+        // Fassung 2 schreibt in das eigene Repository des Vorhabens; die alte
+        // Ablage bleibt unverändert.
+        if (AKTIV && AKTIV.format === 2) {
+          await speichereImVorhaben(koerper, res);
+          return;
+        }
         const board = liesBoard();
         const vorgang = (board.vorgaenge || []).find((v) => v.id === koerper.vorhaben);
         if (!vorgang) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
@@ -2081,308 +5349,6 @@ export function apply(ctx) {
         sende(res, 200, {
           ok: true, name, laenge: text.length, basis: neueBasis, fassung: neueBasis,
         });
-      } catch (error) {
-        sende(res, 400, { error: String((error && error.message) || error) });
-      }
-    },
-  }));
-
-  // Ein Beitrag ist ein Vorschlag, keine Änderung: geschrieben wird unter
-  // `beitraege/`, die Datei im Vorhaben bleibt unberührt. Wer das Board sieht,
-  // darf beitragen — unabhängig von `darf.aendern`.
-  ctx.effect(() => registriere({
-    kind: 'exact',
-    path: '/board/beitrag',
-    handler: async (req, res) => {
-      if (req.method === 'GET') {
-        try {
-          const frage = new URL(req.url, 'http://localhost').searchParams;
-          const id = String(frage.get('beitrag') || '');
-          if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
-            sende(res, 400, { error: 'Ungültige Beitrags-Kennung' }); return;
-          }
-          const beitrag = liesBeitraege(REPO).find((b) => b.id === id
-            && (!frage.get('vorhaben') || b.vorhaben === frage.get('vorhaben')));
-          if (!beitrag) { sende(res, 404, { error: 'Diesen Beitrag gibt es nicht' }); return; }
-
-          const board = liesBoard();
-          const vorgang = (board.vorgaenge || []).find((v) => v.id === beitrag.vorhaben);
-          const stationen = stationenVon(board);
-          const dateien = (beitrag.dateien || []).map((d) => {
-            const sicher = /^beitraege\/[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
-            if (!sicher.test(d.datei)) {
-              return { name: d.name, datei: d.datei, exists: false, text: '' };
-            }
-            try {
-              return {
-                name: d.name,
-                datei: d.datei,
-                exists: true,
-                text: readFileSync(join(REPO, d.datei), 'utf8'),
-              };
-            } catch {
-              return { name: d.name, datei: d.datei, exists: false, text: '' };
-            }
-          });
-          sende(res, 200, {
-            beitrag: {
-              ...beitrag,
-              vorhabenName: vorgang ? vorgang.name : beitrag.vorhaben,
-              station: stationen.get(beitrag.schritt) || beitrag.schritt,
-              dateien: (beitrag.dateien || []).map((d) => d.name),
-            },
-            dateien,
-          });
-        } catch (error) {
-          sende(res, 500, { error: String((error && error.message) || error) });
-        }
-        return;
-      }
-      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
-
-      try {
-        const koerper = await leseKoerper(req);
-        const board = liesBoard();
-        const vorgang = (board.vorgaenge || []).find(
-          (v) => v.id === String(koerper.vorhaben || ''),
-        );
-        if (!vorgang) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
-
-        const stationen = stationenVon(board);
-        const schritt = String(koerper.schritt || vorgang.position || '').trim();
-        if (!stationen.has(schritt)) {
-          sende(res, 400, { error: 'Station nicht gefunden: ' + schritt }); return;
-        }
-
-        const dateien = beitragDateien(koerper.dateien);
-        if (dateien === null) {
-          sende(res, 400, {
-            error: 'Jede vorgeschlagene Datei braucht einen gültigen Namen und ihren Text.',
-          });
-          return;
-        }
-        const notiz = String(koerper.notiz == null ? '' : koerper.notiz)
-          .trim().slice(0, MAX_INHALT);
-        if (!notiz && !dateien.length) {
-          sende(res, 400, {
-            error: 'Ein Beitrag braucht eine Notiz oder eine vorgeschlagene Datei.',
-          });
-          return;
-        }
-
-        // Die Basis eines Beitrags ist die Fassung, auf der sein Vorschlag
-        // aufsitzt. Die Seite gibt bei einem überholten Stand die neue Basis
-        // der Datei mit; ohne Angabe gilt wie bisher der Stand von HEAD.
-        const hatBasis = Object.prototype.hasOwnProperty.call(koerper, 'basis');
-        let basis;
-        if (hatBasis) {
-          basis = koerper.basis == null ? null : String(koerper.basis).trim() || null;
-          if (basis !== null && !/^[0-9a-f]{7,40}$/.test(basis)) {
-            sende(res, 400, { error: 'Ungültige Basis' });
-            return;
-          }
-        } else {
-          const kopf = git(['rev-parse', 'HEAD']);
-          const hash = kopf.ok ? kopf.out.trim() : '';
-          basis = /^[0-9a-f]{40}$/.test(hash) ? hash : null;
-        }
-        const beitrag = {
-          id: beitragKennung(new Set(liesBeitraege(REPO).map((b) => b.id))),
-          vorhaben: String(vorgang.id),
-          schritt,
-          von: String(eigenePerson().name || '').trim() || PERSON_ID,
-          seit: new Date().toISOString(),
-          basis,
-          notiz,
-          dateien: [],
-          entschieden: null,
-        };
-
-        let geschrieben;
-        try {
-          geschrieben = schreibeBeitrag(REPO, beitrag, dateien);
-        } catch (fehler) {
-          sende(res, 400, { error: String((fehler && fehler.message) || fehler) });
-          return;
-        }
-        // Jeder Beitrag ist eine eigene Fassung; der Urheber ist, wer ihn
-        // schreibt — nicht der, dem das Vorhaben gehört.
-        festhalten('Beitrag zu „' + (vorgang.name || vorgang.id) + '“ an „'
-          + (stationen.get(schritt) || schritt) + '“'
-          + (dateien.length ? ' mit ' + dateien.length
-            + (dateien.length === 1 ? ' vorgeschlagenen Datei' : ' vorgeschlagenen Dateien') : ''),
-        autorMensch());
-
-        sende(res, 200, { ok: true, beitrag: geschrieben });
-      } catch (error) {
-        sende(res, 400, { error: String((error && error.message) || error) });
-      }
-    },
-  }));
-
-  // Über einen Beitrag entscheidet der Verantwortliche des Vorhabens: ganz,
-  // in Teilen oder ablehnend. Erst der Entscheid ändert den Stand des
-  // Vorhabens; der Beitrag bleibt mit Notiz, Fassungen und Vermerk liegen.
-  ctx.effect(() => registriere({
-    kind: 'exact',
-    path: '/board/beitrag/entscheiden',
-    handler: async (req, res) => {
-      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
-      try {
-        const koerper = await leseKoerper(req);
-        const id = String(koerper.beitrag || '');
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
-          sende(res, 400, { error: 'Ungültige Beitrags-Kennung' }); return;
-        }
-        const beitrag = liesBeitraege(REPO).find((b) => b.id === id);
-        if (!beitrag) { sende(res, 404, { error: 'Diesen Beitrag gibt es nicht' }); return; }
-
-        const board = liesBoard();
-        const vorgang = (board.vorgaenge || []).find((v) => v.id === beitrag.vorhaben);
-        if (!vorgang) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
-
-        // Zuerst die Zuständigkeit: nur wer das Vorhaben verantwortet,
-        // entscheidet über seinen Beitrag.
-        if (!darf(vorgang, 'entscheiden', PERSON_ID)) {
-          sende(res, 403, { error: 'Über dieses Vorhaben entscheidet jemand anderes.' });
-          return;
-        }
-        if (beitrag.entschieden) {
-          sende(res, 409, { error: 'Dieser Beitrag ist schon entschieden.' });
-          return;
-        }
-
-        const art = String(koerper.art || '');
-        if (art !== 'annehmen' && art !== 'ablehnen') {
-          sende(res, 400, { error: 'Der Entscheid ist „annehmen“ oder „ablehnen“.' });
-          return;
-        }
-
-        // Die Kennungen kommen aus der Ablage; geprüft wird trotzdem, weil ein
-        // Entscheid in Dateien schreibt, die nicht aus dem Beitrag stammen.
-        if (!/^[a-z0-9][a-z0-9._-]*$/.test(String(beitrag.vorhaben))
-          || String(beitrag.vorhaben).includes('..')) {
-          sende(res, 400, { error: 'Ungültige Vorhaben-Kennung' }); return;
-        }
-        const vorgeschlagen = (beitrag.dateien || []).map((d) => d.name);
-        let teile;
-        if (art === 'ablehnen') {
-          // Ablehnen nimmt nichts; der Stand des Vorhabens bleibt unverändert.
-          teile = [];
-        } else if (koerper.teile == null) {
-          // Ohne Angabe werden alle vorgeschlagenen Dateien übernommen.
-          teile = vorgeschlagen.slice();
-        } else {
-          if (!Array.isArray(koerper.teile)) {
-            sende(res, 400, { error: 'teile ist eine Liste von Dateinamen.' }); return;
-          }
-          teile = [];
-          for (const wert of koerper.teile) {
-            const name = String(wert == null ? '' : wert);
-            if (!vorgeschlagen.includes(name)) {
-              sende(res, 400, { error: 'Diese Datei liegt nicht im Beitrag: ' + name });
-              return;
-            }
-            if (!teile.includes(name)) teile.push(name);
-          }
-        }
-
-        if (art === 'annehmen' && teile.length) {
-          const ordner = ordnerVon(vorgang);
-          if (!ordner) { sende(res, 400, { error: 'Kein Ordner' }); return; }
-          // Erst alle vorgeschlagenen Fassungen lesen. Fehlt eine, wird weder
-          // geschrieben noch entschieden — es bleibt kein halber Stand.
-          const vorbereitet = [];
-          for (const name of teile) {
-            if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(name) || name.includes('..')) {
-              sende(res, 400, { error: 'Ungültiger Dateiname im Beitrag: ' + name });
-              return;
-            }
-            const quelle = join(REPO, 'beitraege', beitrag.vorhaben, beitrag.id, name);
-            let text;
-            try {
-              text = readFileSync(quelle, 'utf8');
-            } catch {
-              sende(res, 400, { error: 'Die vorgeschlagene Datei fehlt: ' + name });
-              return;
-            }
-            vorbereitet.push({ name, text });
-          }
-
-          // Die Basis des Beitrags gilt je übernommener Datei. Wer eine davon
-          // inzwischen geändert hat, bekommt 409 mit den neuen Basen; dann wird
-          // weder eine Datei geschrieben noch der Beitrag entschieden. `teile`
-          // grenzt die Prüfung auf das ein, was wirklich übernommen wird. Die
-          // Fassung des Beitrags muss nicht die letzte sein, die diese Datei
-          // geändert hat — sie muss nur seitdem unverändert sein.
-          const basen = {};
-          const abweichend = [];
-          for (const { name } of vorbereitet) {
-            const aktuelle = dateiBasis(ordner, name);
-            basen[name] = aktuelle;
-            // Eine noch nicht gefasste Datei hat keinen neueren Stand. Sonst
-            // muss die Datei seit der Basis des Beitrags unverändert sein.
-            if (aktuelle !== null && !dateiUnveraendertSeit(ordner, name, beitrag.basis)) {
-              abweichend.push(name);
-            }
-          }
-          if (abweichend.length) {
-            sende(res, 409, {
-              ok: false,
-              error: 'Der Stand ist neuer — nichts wurde übernommen.'
-                + ' Die neuen Basen stehen in `neu`.',
-              neu: basen,
-            });
-            return;
-          }
-
-          mkdirSync(ordner, { recursive: true });
-          const sicherungen = [];
-          try {
-            for (const { name, text } of vorbereitet) {
-              const ziel = join(ordner, name);
-              let alt = null;
-              try { alt = readFileSync(ziel); } catch { /* die Datei ist neu */ }
-              writeFileSync(ziel + '.tmp', text, 'utf8');
-              renameSync(ziel + '.tmp', ziel);
-              sicherungen.push({ ziel, alt });
-            }
-          } catch (fehler) {
-            // Ganz oder gar nicht: was schon geschrieben wurde, kommt zurück.
-            for (const { ziel, alt } of sicherungen.reverse()) {
-              try {
-                if (alt == null) rmSync(ziel, { force: true });
-                else writeFileSync(ziel, alt);
-              } catch { /* mehr lässt sich nicht zurücknehmen */ }
-            }
-            throw fehler;
-          }
-        }
-
-        const entschieden = {
-          von: PERSON_ID,
-          am: new Date().toISOString(),
-          art: art === 'annehmen' ? 'angenommen' : 'abgelehnt',
-          teile,
-        };
-        let geschrieben;
-        try {
-          geschrieben = schreibeEntscheid(REPO, beitrag.vorhaben, beitrag.id, entschieden);
-        } catch (fehler) {
-          sende(res, 400, { error: String((fehler && fehler.message) || fehler) });
-          return;
-        }
-
-        // Annehmen schreibt die übernommenen Dateien als neue Fassung; in
-        // beiden Fällen hält der Entscheid den Beitrag mit dem eigenen
-        // Urheber fest — abgelehnt wird ebenso verbindlich wie angenommen.
-        festhalten('Beitrag zu „' + (vorgang.name || vorgang.id) + '“ '
-          + (entschieden.art === 'angenommen' ? 'angenommen' : 'abgelehnt')
-          + (entschieden.art === 'angenommen' && teile.length
-            ? ' (' + teile.join(', ') + ')' : ''),
-        autorMensch());
-
-        sende(res, 200, { ok: true, beitrag: geschrieben });
       } catch (error) {
         sende(res, 400, { error: String((error && error.message) || error) });
       }
@@ -2635,6 +5601,773 @@ export function apply(ctx) {
         sende(res, 200, datenAntwort(mitAbleitung(board)));
       } catch (error) {
         sende(res, 400, { error: String((error && error.message) || error) });
+      }
+    },
+  }));
+
+  // Eine Station, die das Board schon kennt, als Verweis in seinen Workflow
+  // stellen. Geschrieben wird nur `workflow.json` im Workflow-Repository;
+  // Station, Vorhaben und Board bleiben unberührt. Kein Push — weitergegeben
+  // wird beim Abgleich.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/workflow/station',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      if (!AKTIV || AKTIV.format !== 2) {
+        sende(res, 409, {
+          error: 'Eine Station kommt nur in einem Board der Fassung 2 in den Workflow',
+        });
+        return;
+      }
+      try {
+        // Ohne Schreibrecht bleibt das Board im Lesemodus.
+        if (!(await darfFuerBoard())) {
+          sende(res, 403, { error: 'Nur lesen: für dieses Board fehlt das Schreibrecht.' });
+          return;
+        }
+        const koerper = await leseKoerper(req);
+        const wunschStation = String(koerper.station == null ? '' : koerper.station).trim();
+        const wunschRepo = String(koerper.repo == null ? '' : koerper.repo).trim();
+        if (!wunschStation && !wunschRepo) {
+          sende(res, 400, { error: 'Station fehlt' }); return;
+        }
+        if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+
+        const board = liesBoardFassung2(REPO);
+
+        // Das Workflow-Repository des offenen Boards. Ohne eines gibt es
+        // nichts zu schreiben.
+        let workflowOrt = '';
+        for (const verweis of board.workflows) {
+          const ort = ortImRepo(verweis.repo, REPO);
+          if (!ort) continue;
+          try {
+            if (liesRepo(ort).art === 'workflow') { workflowOrt = ort; break; }
+          } catch {
+            /* Der Verweis führt zu keinem lesbaren Workflow. */
+          }
+        }
+        if (!workflowOrt) {
+          sende(res, 409, { error: 'Das Board hat kein Workflow-Repository' }); return;
+        }
+        let workflow;
+        try {
+          workflow = liesWorkflow(workflowOrt);
+        } catch (fehler) {
+          sende(res, 409, {
+            error: 'Der Workflow lässt sich nicht lesen: '
+              + String((fehler && fehler.message) || fehler),
+          });
+          return;
+        }
+
+        // Die Station im Board suchen — über ihre Kennung oder ihren Pfad.
+        let treffer = null;
+        for (const verweis of board.stationen) {
+          const ort = ortImRepo(verweis.repo, REPO);
+          if (!ort) continue;
+          if (wunschRepo) {
+            if (resolve(REPO, wunschRepo) === ort) { treffer = { ort }; break; }
+            continue;
+          }
+          try {
+            const repo = liesRepo(ort);
+            if (repo.art !== 'station') continue;
+            const gelesen = liesStation(ort);
+            if (gelesen.id === wunschStation) { treffer = { ort }; break; }
+          } catch {
+            /* Ein unlesbarer Verweis ist kein Treffer. */
+          }
+        }
+        if (!treffer) {
+          sende(res, 404, {
+            error: 'Diese Station steht nicht im Board: ' + (wunschStation || wunschRepo),
+          });
+          return;
+        }
+
+        // Liegt das Repository da? Ohne Stationsdatei wird nichts geschrieben.
+        let station;
+        try {
+          const repo = liesRepo(treffer.ort);
+          if (repo.art !== 'station') throw new Error('Der Ordner ist keine Station');
+          station = liesStation(treffer.ort);
+        } catch {
+          sende(res, 404, {
+            error: 'Das Stations-Repository fehlt oder ist keine Station: ' + treffer.ort,
+          });
+          return;
+        }
+
+        // Wer diese Station in den Workflow stellt, muss sie verantworten:
+        // ihr Host, der Autor des Workflows oder das Team `workflows`. Die
+        // Prüfung steht vor jedem Schreiben.
+        if (!(await verantwortetStation({
+          station,
+          workflow,
+          lokal: !hatGithubRemote(workflowOrt),
+        }))) {
+          sende(res, 403, { error: 'Nicht verantwortlich für diese Station' });
+          return;
+        }
+
+        // Ein öffentlicher Workflow darf nur auf öffentliche Stationen
+        // verweisen. Die Prüfung steht vor dem Schreiben: kein Commit.
+        if (sichtbarkeitVon(HOME, workflowOrt) === 'öffentlich'
+          && sichtbarkeitVon(HOME, treffer.ort) === 'privat') {
+          sende(res, 409, { error: 'Öffentlich verweist nur auf Öffentliches' });
+          return;
+        }
+
+        // Den Verweis im Workflow suchen. Fehlt er, kommt er mit einer festen
+        // Fassung hinein; eine leere oder fehlende Fassung wird zum kurzen
+        // HEAD, kein Tag wird erfunden. Ist der Verweis schon da, bleibt seine
+        // Fassung, wie sie ist — nachgezogen wird als eigene Handlung.
+        let stationRef = workflow.stationen.find(
+          (eintrag) => ortImRepo(eintrag.repo, workflowOrt) === treffer.ort,
+        ) || null;
+        let neuerStation = null;
+        if (!stationRef) {
+          const fassung = fassungZumFestschreiben(treffer.ort);
+          if (!fassung) {
+            sende(res, 409, { error: 'Die Station hat keine Fassung: ' + treffer.ort });
+            return;
+          }
+          const vorhandene = new Set(workflow.stationen.map((eintrag) => eintrag.id));
+          neuerStation = {
+            repo: verweisFuerRepo(treffer.ort),
+            fassung,
+            id: kennung(station.id, vorhandene),
+          };
+          stationRef = neuerStation;
+        }
+
+        // Eine neue Position, auch wenn dieselbe Station schon eine hat: die
+        // zweite Stelle ist erlaubt. Die Kennung folgt `<station>`, dann
+        // `<station>-2`, `<station>-3` …
+        const positionsBelegt = new Set(workflow.positionen.map((eintrag) => eintrag.id));
+        let positionsId = stationRef.id;
+        if (positionsBelegt.has(positionsId)) {
+          let nummer = 2;
+          while (positionsBelegt.has(stationRef.id + '-' + nummer)) nummer += 1;
+          positionsId = stationRef.id + '-' + nummer;
+        }
+
+        // Die neue Position steht hinter der letzten und möglichst frei.
+        const letzte = workflow.positionen.length
+          ? workflow.positionen[workflow.positionen.length - 1] : null;
+        let x = 40;
+        let y = 80;
+        if (letzte) {
+          x = (Number.isFinite(letzte.x) ? letzte.x : 40) + 320;
+          y = Number.isFinite(letzte.y) ? letzte.y : 80;
+        }
+        const lagen = new Set(workflow.positionen.map((eintrag) => eintrag.x + ':' + eintrag.y));
+        while (lagen.has(x + ':' + y)) x += 320;
+
+        const neuePosition = {
+          id: positionsId,
+          station: stationRef.id,
+          x,
+          y,
+          bedingung: [],
+        };
+        // Hat die letzte Position keine ausgehende Kante, wird die neue
+        // angeschlossen. Sonst bleibt der Workflow, wie er ist.
+        const kante = letzte && !workflow.kanten.some((eintrag) => eintrag.von === letzte.id)
+          ? { von: letzte.id, nach: positionsId }
+          : null;
+
+        // Erst prüfen, dann schreiben: ohne Fassungsablage entsteht keine
+        // halbe Änderung.
+        if (!git(['rev-parse', '--git-dir'], null, undefined, workflowOrt).ok) {
+          sende(res, 409, {
+            error: 'Das Workflow-Repository ist keine Fassungsablage: ' + workflowOrt,
+          });
+          return;
+        }
+
+        schreibeWorkflow(workflowOrt, {
+          station: neuerStation,
+          position: neuePosition,
+          kante,
+        });
+
+        const autor = autorFassung2();
+        const nachricht = 'Station „' + station.name + '“ in den Workflow gestellt';
+        const lage = git(['status', '--porcelain', '--', 'workflow.json'],
+          autor, undefined, workflowOrt);
+        if (!lage.ok) {
+          throw fehlerMit('Das Workflow-Repository antwortet nicht: '
+            + String(lage.fehler || '').trim(), 500);
+        }
+        if (lage.out.trim()) {
+          const add = git(['add', '--', 'workflow.json'], autor, undefined, workflowOrt);
+          if (!add.ok) {
+            throw fehlerMit('workflow.json ließ sich nicht vormerken: '
+              + String(add.fehler || '').trim(), 500);
+          }
+          const commit = git(['commit', '-m', nachricht, '--', 'workflow.json'],
+            autor, undefined, workflowOrt);
+          if (!commit.ok) {
+            throw fehlerMit('workflow.json ließ sich nicht fassen: '
+              + String(commit.fehler || '').trim(), 500);
+          }
+        }
+
+        // Die Antwort ist das Board, wie es jetzt dasteht.
+        sende(res, 200, await fassung2Antwort());
+      } catch (error) {
+        sende(res, (error && error.status) || 400, {
+          error: String((error && error.message) || error),
+        });
+      }
+    },
+  }));
+
+  // Eine Station im Workflow auf eine andere Fassung ziehen — als eigene
+  // Handlung. Eine neue Fassung an der Station ändert den Workflow nicht; erst
+  // dieser Weg schreibt den einen Verweis um und fasst ihn. Geschrieben wird
+  // nur `workflow.json` im Workflow-Repository, kein Push.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/workflow/nachziehen',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      if (!AKTIV || AKTIV.format !== 2) {
+        sende(res, 409, {
+          error: 'Eine Fassung wird nur in einem Board der Fassung 2 nachgezogen',
+        });
+        return;
+      }
+      if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+      try {
+        // Ohne Schreibrecht bleibt das Board im Lesemodus.
+        if (!(await darfFuerBoard())) {
+          sende(res, 403, { error: 'Nur lesen: für dieses Board fehlt das Schreibrecht.' });
+          return;
+        }
+        const koerper = await leseKoerper(req);
+        const wunschStation = String(koerper.station == null ? '' : koerper.station).trim();
+        const wunschFassung = String(koerper.fassung == null ? '' : koerper.fassung).trim();
+        if (!wunschStation) { sende(res, 400, { error: 'Station fehlt' }); return; }
+
+        const board = liesBoardFassung2(REPO);
+
+        // Das Workflow-Repository des offenen Boards — dasselbe wie beim
+        // Einstellen einer Station. Ohne eines gibt es nichts nachzuziehen.
+        let workflowOrt = '';
+        for (const verweis of board.workflows) {
+          const ort = ortImRepo(verweis.repo, REPO);
+          if (!ort) continue;
+          try {
+            if (liesRepo(ort).art === 'workflow') { workflowOrt = ort; break; }
+          } catch {
+            /* Der Verweis führt zu keinem lesbaren Workflow. */
+          }
+        }
+        if (!workflowOrt) {
+          sende(res, 409, { error: 'Das Board hat kein Workflow-Repository' }); return;
+        }
+        let workflow;
+        try {
+          workflow = liesWorkflow(workflowOrt);
+        } catch (fehler) {
+          sende(res, 409, {
+            error: 'Der Workflow lässt sich nicht lesen: '
+              + String((fehler && fehler.message) || fehler),
+          });
+          return;
+        }
+
+        // Die Station muss in diesem Workflow stehen: nachgezogen wird ein
+        // vorhandener Verweis, nicht ein erfundener.
+        const eintrag = workflow.stationen.find((station) => station.id === wunschStation);
+        if (!eintrag) {
+          sende(res, 404, {
+            error: 'Diese Station steht nicht im Workflow: ' + wunschStation,
+          });
+          return;
+        }
+        const ort = ortImRepo(eintrag.repo, workflowOrt);
+        if (!ort) {
+          sende(res, 404, {
+            error: 'Das Stations-Repository liegt nicht lokal: ' + String(eintrag.repo),
+          });
+          return;
+        }
+        try {
+          if (liesRepo(ort).art !== 'station') throw new Error('keine Station');
+        } catch {
+          sende(res, 404, { error: 'Das Stations-Repository fehlt: ' + ort });
+          return;
+        }
+
+        // Ohne Angabe gilt der neueste Tag, sonst der kurze HEAD. Ein Tag wird
+        // nicht erfunden; die genannte Fassung muss ihre `station.json`
+        // tragen, sonst wäre sie für den Workflow keine.
+        const ziel = wunschFassung || fassungFuerStation(ort);
+        if (!ziel) {
+          sende(res, 409, { error: 'Die Station hat keine Fassung: ' + ort });
+          return;
+        }
+        if (!fassungMitStation(ort, ziel)) {
+          sende(res, 409, {
+            error: 'Die Fassung „' + ziel + '“ fehlt in ' + ort,
+          });
+          return;
+        }
+
+        // Schon auf dieser Fassung: die Antwort ist das Bild, gefasst wird
+        // nichts — ein leerer Commit entsteht nicht.
+        if (ziel === eintrag.fassung) {
+          sende(res, 200, await fassung2Antwort());
+          return;
+        }
+
+        // Erst prüfen, dann schreiben: ohne Fassungsablage entsteht keine
+        // halbe Änderung.
+        if (!git(['rev-parse', '--git-dir'], null, undefined, workflowOrt).ok) {
+          sende(res, 409, {
+            error: 'Das Workflow-Repository ist keine Fassungsablage: ' + workflowOrt,
+          });
+          return;
+        }
+
+        schreibeFassung(workflowOrt, eintrag.id, ziel);
+
+        // Die Meldung nennt den Namen von der Fassung, auf die gezogen wird;
+        // ohne lesbaren Namen trägt die Kennung sie.
+        let name = eintrag.id;
+        const aufFassung = liesStationAufFassung(ort, ziel);
+        if (aufFassung.station) {
+          name = aufFassung.station.name || eintrag.id;
+        } else {
+          try {
+            name = liesStation(ort).name || eintrag.id;
+          } catch {
+            /* Die Kennung trägt die Meldung auch ohne Namen. */
+          }
+        }
+        const autor = autorFassung2();
+        const nachricht = 'Station „' + name + '“ auf Fassung ' + ziel + ' nachgezogen';
+        const lage = git(['status', '--porcelain', '--', 'workflow.json'],
+          autor, undefined, workflowOrt);
+        if (!lage.ok) {
+          throw fehlerMit('Das Workflow-Repository antwortet nicht: '
+            + String(lage.fehler || '').trim(), 500);
+        }
+        if (lage.out.trim()) {
+          const add = git(['add', '--', 'workflow.json'], autor, undefined, workflowOrt);
+          if (!add.ok) {
+            throw fehlerMit('workflow.json ließ sich nicht vormerken: '
+              + String(add.fehler || '').trim(), 500);
+          }
+          const commit = git(['commit', '-m', nachricht, '--', 'workflow.json'],
+            autor, undefined, workflowOrt);
+          if (!commit.ok) {
+            throw fehlerMit('workflow.json ließ sich nicht fassen: '
+              + String(commit.fehler || '').trim(), 500);
+          }
+        }
+
+        // Die Antwort ist das Board, wie es jetzt dasteht.
+        sende(res, 200, await fassung2Antwort());
+      } catch (error) {
+        sende(res, (error && error.status) || 400, {
+          error: String((error && error.message) || error),
+        });
+      }
+    },
+  }));
+
+  // Einen Workflow als Verweis in das Board aufnehmen. Geschrieben wird nur
+  // `board.json` im Board-Repository; Workflow, Stationen und Vorhaben bleiben
+  // unberührt, und nichts wird weitergegeben — der Abgleich holt das nach.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/workflow/verbinden',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
+      if (!AKTIV || AKTIV.format !== 2) {
+        sende(res, 409, {
+          error: 'Ein Workflow kommt nur in einem Board der Fassung 2 ins Board',
+        });
+        return;
+      }
+      if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+      try {
+        // Ohne Schreibrecht bleibt das Board im Lesemodus.
+        if (!(await darfFuerBoard())) {
+          sende(res, 403, { error: 'Nur lesen: für dieses Board fehlt das Schreibrecht.' });
+          return;
+        }
+        const koerper = await leseKoerper(req);
+        const wunsch = String(koerper.repo == null ? '' : koerper.repo).trim();
+        if (!wunsch) { sende(res, 400, { error: 'Ordner oder Adresse fehlt' }); return; }
+
+        // Der Ordner gilt gegen das Board-Repository. Eine Adresse liegt
+        // nicht auf diesem Rechner; geklont wird hier nicht.
+        const ort = ortImRepo(wunsch, REPO);
+        if (!ort) {
+          sende(res, 404, {
+            error: 'Das Workflow-Repository liegt nicht lokal: ' + wunsch,
+          });
+          return;
+        }
+
+        // Ein Workflow-Ordner ist ein Repository mit lesbarer `workflow.json`.
+        let gelesen;
+        try {
+          const repo = liesRepo(ort);
+          if (repo.art !== 'workflow') {
+            throw new Error('Der Ordner ist kein Workflow: ' + ort);
+          }
+          gelesen = liesWorkflow(ort);
+        } catch (fehler) {
+          sende(res, 404, {
+            error: 'Kein Workflow-Ordner: ' + String((fehler && fehler.message) || fehler),
+          });
+          return;
+        }
+
+        // Steht er schon im Board, bleibt alles, wie es ist.
+        const board = liesBoardFassung2(REPO);
+        const schonDa = board.workflows.some(
+          (eintrag) => ortImRepo(eintrag.repo, REPO) === ort,
+        );
+        if (schonDa) {
+          sende(res, 409, { error: 'Dieser Workflow steht schon im Board' });
+          return;
+        }
+
+        // Ein öffentliches Board darf nur öffentliche Workflows aufnehmen.
+        // Die Prüfung steht vor dem Schreiben: kein Commit.
+        if (sichtbarkeitVon(HOME, REPO) === 'öffentlich'
+          && sichtbarkeitVon(HOME, ort) === 'privat') {
+          sende(res, 409, { error: 'Öffentlich verweist nur auf Öffentliches' });
+          return;
+        }
+
+        // Die feste Fassung: der letzte Tag, sonst der Stand von HEAD.
+        const fassung = fassungDesRepos(ort);
+        if (!fassung) {
+          sende(res, 409, { error: 'Der Workflow hat keine Fassung: ' + ort });
+          return;
+        }
+
+        // Erst prüfen, dann schreiben: ohne Fassungsablage entsteht keine
+        // halbe Änderung.
+        if (!git(['rev-parse', '--git-dir'], null, undefined, REPO).ok) {
+          sende(res, 409, {
+            error: 'Das Board-Repository ist keine Fassungsablage: ' + REPO,
+          });
+          return;
+        }
+
+        const hinzugefuegt = schreibeBoardFassung2(REPO, {
+          workflow: { repo: verweisFuerRepo(ort), fassung },
+        });
+        if (!hinzugefuegt) {
+          sende(res, 409, { error: 'Dieser Workflow steht schon im Board' });
+          return;
+        }
+
+        // Gefasst wird nur `board.json`; ein Push gehört zum Abgleich.
+        const autor = autorFassung2();
+        const nachricht = 'Workflow „' + gelesen.titel + '“ ins Board aufgenommen';
+        const lage = git(['status', '--porcelain', '--', 'board.json'],
+          autor, undefined, REPO);
+        if (!lage.ok) {
+          throw fehlerMit('Das Board-Repository antwortet nicht: '
+            + String(lage.fehler || '').trim(), 500);
+        }
+        if (lage.out.trim()) {
+          const add = git(['add', '--', 'board.json'], autor, undefined, REPO);
+          if (!add.ok) {
+            throw fehlerMit('board.json ließ sich nicht vormerken: '
+              + String(add.fehler || '').trim(), 500);
+          }
+          const commit = git(['commit', '-m', nachricht, '--', 'board.json'],
+            autor, undefined, REPO);
+          if (!commit.ok) {
+            throw fehlerMit('board.json ließ sich nicht fassen: '
+              + String(commit.fehler || '').trim(), 500);
+          }
+        }
+
+        // Die Antwort ist das Board, wie es jetzt dasteht.
+        sende(res, 200, await fassung2Antwort());
+      } catch (error) {
+        sende(res, (error && error.status) || 400, {
+          error: String((error && error.message) || error),
+        });
+      }
+    },
+  }));
+
+  // Stationen: das Vertrauensbild lesen (`GET`) und eine Station anlegen
+  // (`POST`). Beide Wege liegen unter demselben Pfad.
+  /**
+   * Eine Station anlegen: `{ name, beschreibung? }`. Nur Fassung 2; ohne
+   * Eigentümer (Schritt 25) oder ohne Recht am Anlegen (Schritt 26) antwortet
+   * die Route 403 mit Grund und Hinweis. Nach Erfolg steht der Verweis in
+   * `board.stationen`, `board.json` ist gefasst, und die Antwort ist das neue
+   * Bild samt `station`.
+   */
+  async function legeStationAn(req, res) {
+    try {
+      const koerper = await leseKoerper(req);
+      if (!AKTIV || AKTIV.format !== 2) {
+        sende(res, 409, {
+          error: 'Eine Station lässt sich nur in einem Board der Fassung 2 anlegen',
+        });
+        return;
+      }
+      if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+
+      const name = String(koerper.name == null ? '' : koerper.name).trim();
+      if (!name) { sende(res, 400, { error: 'Name fehlt' }); return; }
+      if (name.length > 80) {
+        sende(res, 400, { error: 'Der Name ist zu lang: höchstens 80 Zeichen' });
+        return;
+      }
+      const beschreibung = String(koerper.beschreibung == null
+        ? '' : koerper.beschreibung).trim();
+      const kurzName = slug(name);
+      if (!kurzName) {
+        sende(res, 400, {
+          error: 'Der Name enthält keine Buchstaben oder Ziffern für die Repo-Kennung',
+        });
+        return;
+      }
+
+      const board = liesBoardFassung2(REPO);
+      if (!git(['rev-parse', '--git-dir'], null, undefined, REPO).ok) {
+        sende(res, 409, {
+          error: 'Das Board-Repository ist keine Fassungsablage: ' + REPO,
+        });
+        return;
+      }
+
+      // Der Eigentümer: ein Eintrag im Board, sonst die Anmeldung. Ohne ihn
+      // entsteht kein Repository — die Antwort nennt den Grund und den Weg.
+      const eigentuemer = await eigentuemerBild(board);
+      if (!eigentuemer.eigentuemer) {
+        sende(res, 403, {
+          error: 'Ohne Eigentümer entsteht keine Station: es ist nicht bekannt, '
+            + 'unter wem sie liegen soll.',
+          grund: 'Der Eigentümer des Boards ist leer.',
+          hinweis: String(eigentuemer.eigentuemerHinweis || EIGENTUEMER_HINWEIS),
+        });
+        return;
+      }
+      const owner = eigentuemer.eigentuemer;
+      if (!EIGENTUEMER_MUSTER.test(owner)) {
+        sende(res, 400, { error: 'Der Eigentümer ist ungültig: ' + owner });
+        return;
+      }
+
+      // Neue Dinge entstehen nur mit Anmeldung. Der Grund und der Hinweis
+      // kommen aus derselben Antwort, die `/board/data` zeigt.
+      const anlegen = anlegenBild();
+      if (anlegen.darf !== true) {
+        sende(res, 403, {
+          error: anlegen.grund || 'Neue Dinge brauchen eine Anmeldung.',
+          ...(anlegen.hinweis ? { hinweis: anlegen.hinweis } : null),
+        });
+        return;
+      }
+
+      const repo = 'station-' + kurzName;
+      const pfad = cachePfad(HOME, owner, repo);
+      if (!pfad) {
+        sende(res, 500, { error: 'Ohne Zuhause gibt es keinen Zwischenspeicher' });
+        return;
+      }
+      // Der Name kann im Zwischenspeicher belegt sein, auch wenn GitHub ihn
+      // nicht kennt: dann steht dort schon eine Station.
+      if (existsSync(pfad)) {
+        sende(res, 409, { error: 'Eine Station mit diesem Namen gibt es schon' });
+        return;
+      }
+
+      // Die Naht: `selbst` fragt GitHub, `attrappe` sieht nur in den
+      // Zwischenspeicher. Die Wahl steht in `einstellungen.anlegeweg`.
+      const weg = anlegewegFuer(board);
+      let pruefung;
+      try {
+        pruefung = await weg.pruefen({ owner, repo });
+      } catch (fehler) {
+        sende(res, anlegeStatus(fehler), { error: kurzZeile(fehler) });
+        return;
+      }
+      if (!pruefung || pruefung.frei !== true) {
+        sende(res, 409, {
+          error: (pruefung && pruefung.meldung)
+            || 'Eine Station mit diesem Namen gibt es schon',
+        });
+        return;
+      }
+
+      const { station, readme, dateien } = stationInhalt({
+        slugName: kurzName, name, beschreibung, owner,
+      });
+      const nachricht = 'Station „' + name + '“ angelegt';
+      const autor = autorFassung2();
+
+      // Erst bauen, dann schicken: der Ordner im Zwischenspeicher ist ohne
+      // Netz lesbar und trägt dieselben zwei Dateien.
+      let angelegtPfad;
+      try {
+        angelegtPfad = baueStation({
+          owner, repo, station, readme, nachricht, autor,
+        });
+      } catch (fehler) {
+        sende(res, Number(fehler && fehler.status) || 500, {
+          error: kurzZeile(fehler),
+        });
+        return;
+      }
+
+      // Danach der Weg: `selbst` legt das öffentliche Repository an und
+      // schreibt die Dateien über die Inhalts-API; `attrappe` schickt nichts.
+      try {
+        await weg.anlegen({
+          owner, repo, beschreibung, themen: [STATION_THEMA], dateien,
+        });
+      } catch (fehler) {
+        // Der halbe Weg bleibt nicht liegen: der lokale Ordner gehört zu
+        // diesem Versuch. Ein Repository bei GitHub wird nicht angefasst.
+        try { rmSync(angelegtPfad, { recursive: true, force: true }); } catch {
+          /* Aufräumen ist nicht wichtiger als der Fehler. */
+        }
+        sende(res, anlegeStatus(fehler), { error: kurzZeile(fehler) });
+        return;
+      }
+
+      // Der Verweis ins Board, nicht doppelt. Gefasst wird nur `board.json`;
+      // ein Push gehört zum Abgleich.
+      schreibeFassung2Station(owner + '/' + repo);
+      const lage = git(['status', '--porcelain', '--', 'board.json'],
+        autor, undefined, REPO);
+      if (!lage.ok) {
+        throw fehlerMit('Das Board-Repository antwortet nicht: '
+          + String(lage.fehler || '').trim(), 500);
+      }
+      if (lage.out.trim()) {
+        const add = git(['add', '--', 'board.json'], autor, undefined, REPO);
+        if (!add.ok) {
+          throw fehlerMit('board.json ließ sich nicht vormerken: '
+            + String(add.fehler || '').trim(), 500);
+        }
+        const commit = git(['commit', '-m', nachricht, '--', 'board.json'],
+          autor, undefined, REPO);
+        if (!commit.ok) {
+          throw fehlerMit('board.json ließ sich nicht fassen: '
+            + String(commit.fehler || '').trim(), 500);
+        }
+      }
+
+      // Das neue Bild in der Form von `/board/data`, dazu der neue Eintrag.
+      const antwort = await fassung2Antwort();
+      antwort.station = { owner, repo, pfad: angelegtPfad, name };
+      sende(res, 200, antwort);
+    } catch (error) {
+      sende(res, (error && error.status) || 500, {
+        error: String((error && error.message) || error),
+      });
+    }
+  }
+
+  // Das Vertrauensbild einer Station (Fassung 2): Name, Host, Fassung,
+  // Reife, Lizenz, Beschreibung, Beispiele, Verwendung und Repository.
+  // Gelesen wird aus dem Repository der Station; fehlt es oder seine Datei,
+  // steht der Grund in der Antwort. Fassung 1 bleibt bei seiner Anzeige.
+  ctx.effect(() => registriere({
+    kind: 'exact',
+    path: '/board/station',
+    handler: async (req, res) => {
+      if (req.method === 'POST') { await legeStationAn(req, res); return; }
+      if (req.method !== 'GET') { sende(res, 405, { error: 'Nur GET' }); return; }
+      if (!AKTIV || AKTIV.format !== 2) {
+        sende(res, 409, {
+          error: 'Das Vertrauensbild einer Station gibt es nur in einem Board der Fassung 2',
+        });
+        return;
+      }
+      if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+      try {
+        const frage = new URL(req.url, 'http://localhost').searchParams;
+        const gesucht = String(frage.get('station') == null ? '' : frage.get('station')).trim();
+        if (!gesucht) { sende(res, 400, { error: 'Station fehlt' }); return; }
+
+        const board = liesBoardFassung2(REPO);
+        let ort = '';
+        let station = null;
+        const unlesbar = [];
+        for (const verweis of board.stationen) {
+          const ziel = ortImRepo(verweis.repo, REPO);
+          if (!ziel) {
+            unlesbar.push({
+              ort: String(verweis.repo == null ? '' : verweis.repo),
+              grund: 'Das Repository liegt nicht lokal',
+            });
+            continue;
+          }
+          try {
+            if (liesRepo(ziel).art !== 'station') {
+              throw new Error('Der Ordner ist keine Station');
+            }
+            const gelesen = liesStation(ziel);
+            if (gelesen.id !== gesucht) continue;
+            ort = ziel;
+            station = gelesen;
+            break;
+          } catch (fehler) {
+            unlesbar.push({
+              ort: ziel,
+              grund: String((fehler && fehler.message) || fehler).split('\n')[0].trim(),
+            });
+          }
+        }
+        if (!station) {
+          // Ist genau ein Verweis unlesbar, ist das der Grund — sonst bleibt
+          // nur, dass keine Station des Boards diese Kennung trägt.
+          const grund = unlesbar.length === 1
+            ? 'Die Station „' + gesucht + '“ lässt sich nicht lesen: ' + unlesbar[0].grund
+            : 'Diese Station steht nicht im Board: ' + gesucht;
+          sende(res, 404, { error: grund });
+          return;
+        }
+
+        const bild = stationBild(board, REPO, ort, station);
+        // Die Zahlen des Vertrauensbilds: zuerst der Katalog-Zwischenspeicher,
+        // dann der frische Blick zu GitHub. Ohne Netz bleibt der letzte Stand
+        // mit einem Hinweis stehen; die Seite selbst bleibt lesbar.
+        const haupt = hauptboardFuerKatalog();
+        let zahlen;
+        try {
+          zahlen = await stationZahlen({
+            repo: ort,
+            hauptboard: haupt ? haupt.repo : '',
+            home: HOME,
+          });
+        } catch (fehler) {
+          zahlen = {
+            sterne: null,
+            freigaben: null,
+            fragen: null,
+            beitraege: null,
+            adresse: '',
+            geprueft: null,
+            hinweis: 'GitHub: ' + kurzZeile(fehler),
+          };
+        }
+        sende(res, 200, { ...bild, ...zahlen });
+      } catch (error) {
+        sende(res, 500, { error: String((error && error.message) || error) });
       }
     },
   }));
@@ -3226,8 +6959,9 @@ export function apply(ctx) {
     },
   }));
 
-  // Einstellungen, die nicht zum Workflow gehören, aber zum Board: wie das
-  // Mausrad schiebt. Sie stehen im Board, damit sie einen Neustart überleben.
+  // Einstellungen, die nicht zum Workflow gehören, aber zum Board: der
+  // Eigentümer neuer Repositories und wie das Mausrad schiebt. Sie stehen im
+  // Board, damit sie einen Neustart überleben.
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/einstellung',
@@ -3236,7 +6970,81 @@ export function apply(ctx) {
       try {
         const koerper = await leseKoerper(req);
         const name = String(koerper.name || '');
-        const wert = String(koerper.wert || '');
+        const rohWert = String(koerper.wert == null ? '' : koerper.wert);
+
+        // Der Eigentümer steht in `board.json` der Fassung 2. Er gilt für
+        // jedes Board gleich; kein Board-Typ bringt einen eigenen Namen mit.
+        if (name === 'eigentuemer') {
+          if (!AKTIV || AKTIV.format !== 2) {
+            sende(res, 409, {
+              error: 'Der Eigentümer wird nur in einem Board der Fassung 2 gespeichert',
+            });
+            return;
+          }
+          if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+          // Ohne Schreibrecht bleibt das Board im Lesemodus.
+          if (!(await darfFuerBoard())) {
+            sende(res, 403, { error: 'Nur lesen: für dieses Board fehlt das Schreibrecht.' });
+            return;
+          }
+          const wert = rohWert.trim();
+          if (wert && !EIGENTUEMER_MUSTER.test(wert)) {
+            sende(res, 400, {
+              error: 'Der Eigentümer ist ungültig: erlaubt sind GitHub-Logins und '
+                + 'Organisationsnamen mit Buchstaben, Ziffern und Bindestrichen',
+            });
+            return;
+          }
+          // Erst prüfen, dann schreiben: eine unlesbare Datei bleibt liegen.
+          try {
+            liesBoardFassung2(REPO);
+          } catch (fehler) {
+            sende(res, 409, {
+              error: 'Das Board lässt sich nicht lesen: '
+                + String((fehler && fehler.message) || fehler),
+            });
+            return;
+          }
+          if (!git(['rev-parse', '--git-dir'], null, undefined, REPO).ok) {
+            sende(res, 409, {
+              error: 'Das Board-Repository ist keine Fassungsablage: ' + REPO,
+            });
+            return;
+          }
+
+          schreibeFassung2Einstellung('eigentuemer', wert);
+
+          // Gefasst wird nur `board.json`; ein Push gehört zum Abgleich.
+          const autor = autorFassung2();
+          const nachricht = wert
+            ? 'Eigentümer „' + wert + '“ gesetzt'
+            : 'Eigentümer gelöscht';
+          const lage = git(['status', '--porcelain', '--', 'board.json'],
+            autor, undefined, REPO);
+          if (!lage.ok) {
+            throw fehlerMit('Das Board-Repository antwortet nicht: '
+              + String(lage.fehler || '').trim(), 500);
+          }
+          if (lage.out.trim()) {
+            const add = git(['add', '--', 'board.json'], autor, undefined, REPO);
+            if (!add.ok) {
+              throw fehlerMit('board.json ließ sich nicht vormerken: '
+                + String(add.fehler || '').trim(), 500);
+            }
+            const commit = git(['commit', '-m', nachricht, '--', 'board.json'],
+              autor, undefined, REPO);
+            if (!commit.ok) {
+              throw fehlerMit('board.json ließ sich nicht fassen: '
+                + String(commit.fehler || '').trim(), 500);
+            }
+          }
+
+          // Die Antwort ist das Board, wie es jetzt dasteht.
+          sende(res, 200, await fassung2Antwort());
+          return;
+        }
+
+        const wert = rohWert;
         if (name !== 'mausrad' || (wert !== 'seitwaerts' && wert !== 'auf-ab')) {
           sende(res, 400, { error: 'Unbekannte Einstellung' }); return;
         }
@@ -3246,7 +7054,9 @@ export function apply(ctx) {
         festhalten(wert === 'seitwaerts' ? 'Mausrad: seitwärts' : 'Mausrad: auf und ab', autorMensch());
         sende(res, 200, datenAntwort(mitAbleitung(board)));
       } catch (error) {
-        sende(res, 400, { error: String((error && error.message) || error) });
+        sende(res, (error && error.status) || 400, {
+          error: String((error && error.message) || error),
+        });
       }
     },
   }));
@@ -3322,6 +7132,205 @@ export function apply(ctx) {
     },
   }));
 
+  /**
+   * Ein Vorhaben anlegen: `{ name, station }`. Nur Fassung 2; ohne Eigentümer
+   * (Schritt 25) oder ohne Recht am Anlegen (Schritt 26) antwortet die Route
+   * 403 mit Grund. Das Vorhaben hängt am ersten Workflow des Boards und steht
+   * an der genannten Station. Gebaut wird lokal im Zwischenspeicher, geschickt
+   * über denselben Anlegeweg wie eine Station, der Verweis landet in
+   * `board.vorhaben`.
+   */
+  async function legeVorhabenAn(req, res, koerper) {
+    try {
+      const name = String(koerper.name == null ? '' : koerper.name).trim();
+      if (!name) { sende(res, 400, { error: 'Name fehlt' }); return; }
+      if (name.length > 120) {
+        sende(res, 400, { error: 'Der Name ist zu lang: höchstens 120 Zeichen' });
+        return;
+      }
+      const station = String(koerper.station == null ? '' : koerper.station).trim();
+      if (!station) { sende(res, 400, { error: 'Station fehlt' }); return; }
+      if (!REPO) { sende(res, 409, { error: 'Noch kein Board verbunden' }); return; }
+
+      let board;
+      try {
+        board = liesBoardFassung2(REPO);
+      } catch (fehler) {
+        sende(res, 409, {
+          error: 'Das Board ist nicht lesbar: ' + kurzZeile(fehler),
+        });
+        return;
+      }
+
+      // Der Eigentümer und das Recht: dieselbe Prüfung wie bei einer Station.
+      const eigentuemer = await eigentuemerBild(board);
+      if (!eigentuemer.eigentuemer) {
+        sende(res, 403, {
+          error: 'Ohne Eigentümer entsteht kein Vorhaben: es ist nicht bekannt, '
+            + 'unter wem es liegen soll.',
+          grund: 'Der Eigentümer des Boards ist leer.',
+          hinweis: String(eigentuemer.eigentuemerHinweis || EIGENTUEMER_HINWEIS),
+        });
+        return;
+      }
+      const owner = eigentuemer.eigentuemer;
+      if (!EIGENTUEMER_MUSTER.test(owner)) {
+        sende(res, 400, { error: 'Der Eigentümer ist ungültig: ' + owner });
+        return;
+      }
+      const anlegen = anlegenBild();
+      if (anlegen.darf !== true) {
+        sende(res, 403, {
+          error: anlegen.grund || 'Neue Dinge brauchen eine Anmeldung.',
+          ...(anlegen.hinweis ? { hinweis: anlegen.hinweis } : null),
+        });
+        return;
+      }
+
+      // Der erste Workflow des Boards, mit seiner festen Fassung.
+      const workflow = (board.workflows || [])[0];
+      if (!workflow || !String(workflow.repo || '').trim()
+        || !String(workflow.fassung || '').trim()) {
+        sende(res, 409, {
+          error: 'Ein Vorhaben braucht den ersten Workflow des Boards mit seiner '
+            + 'Fassung.',
+        });
+        return;
+      }
+
+      // Die Station ist eine Position im Workflow, nicht irgendein Name.
+      const zusammengesetzt = komponiere({
+        repo: REPO, person: PERSON_ID, home: HOME,
+      });
+      const position = (zusammengesetzt.workflow.positionen || [])
+        .find((eintrag) => eintrag.id === station);
+      if (!position) {
+        sende(res, 400, {
+          error: 'Diese Station steht nicht im Workflow: ' + station,
+        });
+        return;
+      }
+      // Der Name der Station, nicht ihre Kennung: er steht im README und in
+      // der Beschreibung, mit der das Repository angelegt wird.
+      const schritt = (zusammengesetzt.schritte || [])
+        .find((eintrag) => eintrag.id === position.schritt);
+      const stationName = (schritt && schritt.name) || position.name || station;
+
+      const kurzName = slug(name);
+      if (!kurzName) {
+        sende(res, 400, {
+          error: 'Der Name enthält keine Buchstaben oder Ziffern für die Repo-Kennung',
+        });
+        return;
+      }
+      const repo = 'vorhaben-' + kurzName;
+      const pfad = cachePfad(HOME, owner, repo);
+      if (!pfad) {
+        sende(res, 500, { error: 'Ohne Zuhause gibt es keinen Zwischenspeicher' });
+        return;
+      }
+      if (existsSync(pfad)) {
+        sende(res, 409, { error: VORHABEN_BELEGT });
+        return;
+      }
+
+      // Vor dem Anlegen fragt derselbe Weg wie bei einer Station.
+      const weg = anlegewegFuer(board);
+      let pruefung;
+      try {
+        pruefung = await weg.pruefen({ owner, repo, art: 'vorhaben' });
+      } catch (fehler) {
+        sende(res, anlegeStatus(fehler), { error: kurzZeile(fehler) });
+        return;
+      }
+      if (!pruefung || pruefung.frei !== true) {
+        sende(res, 409, { error: VORHABEN_BELEGT });
+        return;
+      }
+
+      const login = String(liesLogin(HOME) || '').trim();
+      const farbe = farbeDerHandelnden(board, login);
+      const { vorhaben, readme, dateien } = vorhabenInhalt({
+        slugName: kurzName,
+        name,
+        station,
+        stationName,
+        workflow,
+        login,
+        farbe,
+      });
+      const nachricht = 'Vorhaben „' + name + '“ angelegt';
+      const autor = autorFassung2();
+      let angelegtPfad;
+      try {
+        angelegtPfad = baueVorhaben({
+          owner, repo, vorhaben, readme, nachricht, autor,
+        });
+      } catch (fehler) {
+        sende(res, Number(fehler && fehler.status) || 500, {
+          error: kurzZeile(fehler),
+        });
+        return;
+      }
+
+      // Danach der Weg: `selbst` legt das öffentliche Repository an und
+      // schreibt die Dateien über die Inhalts-API; `attrappe` schickt nichts.
+      try {
+        await weg.anlegen({
+          owner,
+          repo,
+          beschreibung: 'Vorhaben „' + name + '“ an der Station „'
+            + stationName + '“',
+          themen: [VORHABEN_THEMA],
+          dateien,
+          art: 'vorhaben',
+        });
+      } catch (fehler) {
+        // Der halbe Weg bleibt nicht liegen: der lokale Ordner gehört zu
+        // diesem Versuch. Ein Repository bei GitHub wird nicht angefasst.
+        try { rmSync(angelegtPfad, { recursive: true, force: true }); } catch {
+          /* Aufräumen ist nicht wichtiger als der Fehler. */
+        }
+        sende(res, anlegeStatus(fehler), { error: kurzZeile(fehler) });
+        return;
+      }
+
+      // Der Verweis ins Board, nicht doppelt. Gefasst wird nur `board.json`;
+      // ein Push gehört zum Abgleich.
+      schreibeFassung2Vorhaben(owner + '/' + repo);
+      const lage = git(['status', '--porcelain', '--', 'board.json'],
+        autor, undefined, REPO);
+      if (!lage.ok) {
+        throw fehlerMit('Das Board-Repository antwortet nicht: '
+          + String(lage.fehler || '').trim(), 500);
+      }
+      if (lage.out.trim()) {
+        const add = git(['add', '--', 'board.json'], autor, undefined, REPO);
+        if (!add.ok) {
+          throw fehlerMit('board.json ließ sich nicht vormerken: '
+            + String(add.fehler || '').trim(), 500);
+        }
+        const commit = git(['commit', '-m', nachricht, '--', 'board.json'],
+          autor, undefined, REPO);
+        if (!commit.ok) {
+          throw fehlerMit('board.json ließ sich nicht fassen: '
+            + String(commit.fehler || '').trim(), 500);
+        }
+      }
+
+      // Das neue Bild in der Form von `/board/data`, dazu der neue Eintrag.
+      const antwort = await fassung2Antwort();
+      antwort.vorhaben = {
+        owner, repo, id: kurzName, name, position: station,
+      };
+      sende(res, 200, antwort);
+    } catch (error) {
+      sende(res, (error && error.status) || 500, {
+        error: String((error && error.message) || error),
+      });
+    }
+  }
+
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/vorhaben',
@@ -3329,6 +7338,12 @@ export function apply(ctx) {
       if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
       try {
         const koerper = await leseKoerper(req);
+        // Fassung 2 legt ein eigenes Repository an; die alte Ablage bleibt
+        // unverändert.
+        if (AKTIV && AKTIV.format === 2) {
+          await legeVorhabenAn(req, res, koerper);
+          return;
+        }
         const name = String(koerper.name || '').trim().slice(0, 120);
         if (!name) { sende(res, 400, { error: 'Name fehlt' }); return; }
 
@@ -3498,68 +7513,6 @@ export function apply(ctx) {
     },
   }));
 
-  // Ein Fork: eine eigene Kopie eines Vorhabens, auch eines fremden. Er
-  // übernimmt die Dateien im augenblicklichen Stand und die Station, aber
-  // nicht die Läufe: Transkripte und `laeufe` bleiben beim Ursprung. Der
-  // fremde Ordner und seine Dateien werden nur gelesen, nie geschrieben.
-  ctx.effect(() => registriere({
-    kind: 'exact',
-    path: '/board/vorhaben/forken',
-    handler: async (req, res) => {
-      if (req.method !== 'POST') { sende(res, 405, { error: 'Nur POST' }); return; }
-      try {
-        const koerper = await leseKoerper(req);
-        const id = String(koerper.id || '');
-        const board = liesBoard();
-        const quelle = (board.vorgaenge || []).find((v) => v.id === id);
-        if (!quelle) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
-        const name = String(koerper.name || '').trim().slice(0, 120)
-          || (String(quelle.name || 'Vorhaben') + ' — Fork').slice(0, 120);
-
-        board.vorgaenge = Array.isArray(board.vorgaenge) ? board.vorgaenge : [];
-        const neueId = kennung(name, new Set(board.vorgaenge.map((v) => v.id)));
-        const station = String(quelle.position || '');
-        const neu = {
-          id: neueId,
-          name,
-          position: station,
-          ordner: neueId,
-          // Die eigene Person verantwortet den Fork an der übernommenen Station.
-          verantwortliche: { [station]: [PERSON_ID] },
-          regel: 'einer',
-          rueckkehr: [],
-          // Ein Fork beginnt ohne die Läufe des Ursprungs.
-          laeufe: [],
-          fork_von: quelle.id,
-          zweig_von: null,
-        };
-        if (quelle.farbe) neu.farbe = quelle.farbe;
-
-        const zielOrdner = join(VORGANG_DIR, neueId);
-        mkdirSync(zielOrdner, { recursive: true });
-        const altOrdner = ordnerVon(quelle);
-        const kopiert = altOrdner
-          ? kopiereOrdner(altOrdner, zielOrdner, null,
-            // Die Läufe bleiben beim Ursprung; die neue vorhaben.json schreibt
-            // gleich `schreibeBoard` — die des Ursprungs wird nicht kopiert.
-            new Set(['transkripte', 'vorhaben.json']))
-          : { dateien: 0, bytes: 0, voll: false };
-
-        board.vorgaenge.push(neu);
-        schreibeBoard(board);
-        festhalten('Fork „' + name + '“ von „' + quelle.name + '“ angelegt',
-          autorMensch());
-        sende(res, 200, {
-          ...datenAntwort(mitAbleitung(board)),
-          neu: neueId,
-          dateien: kopiert.dateien,
-        });
-      } catch (error) {
-        sende(res, 400, { error: String((error && error.message) || error) });
-      }
-    },
-  }));
-
   ctx.effect(() => registriere({
     kind: 'exact',
     path: '/board/vorhaben/verschieben',
@@ -3572,6 +7525,87 @@ export function apply(ctx) {
         // Mit einer nächsten verantwortlichen Person ist das ein Weitergeben,
         // ohne eine ein Verschieben. Beide fragen `darf`.
         const person = String(koerper.person == null ? '' : koerper.person).trim();
+
+        // Fassung 2: Das Vorhaben liegt in seinem eigenen Repository. Geschrieben
+        // und gefasst wird nur `vorhaben.json`; Station, Workflow und Board
+        // bleiben unberührt. Geschickt wird beim Abgleich über /board/sync.
+        if (AKTIV && AKTIV.format === 2) {
+          // Ohne Schreibrecht bleibt das Board im Lesemodus: auch das
+          // Verschieben eines Vorhabens schreibt in sein Repository.
+          if (!(await darfFuerBoard())) {
+            sende(res, 403, {
+              error: 'Nur lesen: für dieses Board fehlt das Schreibrecht.',
+            });
+            return;
+          }
+          const board = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+          const liste = (board.workflow && board.workflow.positionen) || [];
+          const vorgang = (board.vorgaenge || []).find((v) => v.id === id);
+          if (!vorgang) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
+          const ordner = ordnerFuerVorgang(vorgang);
+          if (!ordner) { sende(res, 404, { error: 'Vorhaben nicht gefunden' }); return; }
+          // Bevor geschrieben wird: Wer hier steht, muss die Station
+          // verantworten — über die Eintragung, das Team oder als lokaler
+          // Besitzer. Die Git-Rechteprüfung oben bleibt davor.
+          if (!(await verantwortetVorhaben(vorgang, vorgang.position, ordner))) {
+            sende(res, 403, { error: 'Nicht verantwortlich für diese Station' });
+            return;
+          }
+          if (person && !(board.personen || []).some((p) => String(p.id) === person)) {
+            sende(res, 400, { error: 'Diese Person gibt es nicht' }); return;
+          }
+          const zielIndex = liste.findIndex((p) => p.id === ziel);
+          if (zielIndex < 0) {
+            sende(res, 400, { error: 'Position gibt es nicht' }); return;
+          }
+
+          // Wie bei Fassung 1: die genannte Person, sonst der bisherige, wenn
+          // an der Zielstation noch niemand steht.
+          const bisher = verantwortlicheVon(vorgang);
+          const verantwortliche = vorgang.verantwortliche
+            && typeof vorgang.verantwortliche === 'object'
+            && !Array.isArray(vorgang.verantwortliche)
+            ? { ...vorgang.verantwortliche }
+            : {};
+          const eingetragen = verantwortliche[ziel];
+          if (person) {
+            verantwortliche[ziel] = [person];
+          } else if (!Array.isArray(eingetragen) || !eingetragen.length) {
+            if (bisher.length) verantwortliche[ziel] = bisher.slice();
+          }
+
+          schreibeVorhaben(ordner, { position: ziel, verantwortliche });
+
+          const autor = autorFassung2();
+          const nachricht = 'Vorhaben „' + vorgang.name + '“ '
+            + (person ? 'weitergegeben' : 'verschoben');
+          const lage = git(['status', '--porcelain', '--', 'vorhaben.json'],
+            autor, undefined, ordner);
+          if (!lage.ok) {
+            throw fehlerMit('Das Vorhaben-Repository antwortet nicht: '
+              + String(lage.fehler || '').trim(), 500);
+          }
+          if (lage.out.trim()) {
+            const add = git(['add', '--', 'vorhaben.json'], autor, undefined, ordner);
+            if (!add.ok) {
+              throw fehlerMit('vorhaben.json ließ sich nicht vormerken: '
+                + String(add.fehler || '').trim(), 500);
+            }
+            const commit = git(['commit', '-m', nachricht, '--', 'vorhaben.json'],
+              autor, undefined, ordner);
+            if (!commit.ok) {
+              throw fehlerMit('vorhaben.json ließ sich nicht fassen: '
+                + String(commit.fehler || '').trim(), 500);
+            }
+          }
+
+          // Die Antwort ist das Board, wie es jetzt dasteht: die Seite setzt
+          // die Karte damit an die neue Station.
+          const nachher = komponiere({ repo: REPO, person: PERSON_ID, home: HOME });
+          sende(res, 200, fassung2Bild(nachher, true));
+          return;
+        }
+
         const board = liesBoard();
         const liste = (board.workflow && board.workflow.positionen) || [];
         const vorgang = (board.vorgaenge || []).find((v) => v.id === id);

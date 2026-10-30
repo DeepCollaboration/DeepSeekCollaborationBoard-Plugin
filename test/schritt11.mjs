@@ -1,5 +1,5 @@
 /**
- * Prüfung Schritt 11 — am fremden Vorhaben speichert der Editor als Beitrag.
+ * Prüfung Schritt 11 — am fremden Vorhaben führt der Beitrag über GitHub.
  *
  * Kopiert die Ablage und das Produkt nach /tmp und legt `p2` samt einem fremden
  * Vorhaben mit `vision.md` erst in der Kopie an. Die echte Ablage bekommt weder
@@ -7,18 +7,17 @@
  *
  * Geprüft wird:
  *
- *   1. ein Beitrag mit geänderter `vision.md` und Notiz entsteht als JSON mit
- *      allen Feldern und als vorgeschlagene Fassung unter `beitraege/…`;
- *   2. das Original und die fremde `vorhaben.json` bleiben byte-gleich, die
- *      Fassung trägt den Namen „Thomas Heinrich“;
- *   3. `/board/data` zeigt den Beitrag an Vorhaben und Station mit Name,
- *      Zeitpunkt, Notiz und Dateinamen; `GET /board/beitrag` liefert Notiz und
- *      vorgeschlagene Fassung zum Lesen;
- *   4. ein Beitrag nur mit Notiz wird angenommen, ein ganz leerer mit 400
- *      abgewiesen und hinterlässt keine Datei und keine Fassung;
+ *   1. das fremde Vorhaben ist sichtbar, `darf.aendern` bleibt für die eigene
+ *      Person falsch;
+ *   2. der alte Weg (`POST`/`GET /board/beitrag`,
+ *      `/board/beitrag/entscheiden`) antwortet 404; es entsteht kein
+ *      `beitraege/`-Ordner und keine Fassung;
+ *   3. das Original und die fremde `vorhaben.json` bleiben byte-gleich;
+ *   4. `/board/data` behält seine Form und die lesbare Beitragsliste;
  *   5. der Leser bietet „Bearbeiten“ auch für ein fremdes Vorhaben und
  *      speichert dort über „Als Beitrag speichern“ mit „Notiz zum Beitrag“
- *      (Quelltext, kein Browserbild).
+ *      als Pull Request über `/board/github/beitrag` (Quelltext, kein
+ *      Browserbild).
  */
 import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
@@ -228,13 +227,25 @@ try {
 
   function get(pfad) {
     const res = antwort();
-    route(pfad.split('?')[0]).handler(anfrage(pfad), res);
+    const r = gebaut.routen.get(pfad.split('?')[0]);
+    if (!r) {
+      res.status = 404;
+      res.text = JSON.stringify({ error: 'Nicht gefunden' });
+      return res;
+    }
+    r.handler(anfrage(pfad), res);
     return res;
   }
 
   async function posting(pfad, koerper) {
     const res = antwort();
-    await route(pfad).handler(anfrage(pfad, koerper), res);
+    const r = gebaut.routen.get(pfad);
+    if (!r) {
+      res.status = 404;
+      res.text = JSON.stringify({ error: 'Nicht gefunden' });
+      return res;
+    }
+    await r.handler(anfrage(pfad, koerper), res);
     return res;
   }
 
@@ -257,149 +268,47 @@ try {
     'Die eigene Person darf das fremde Vorhaben ändern');
   console.log('ok fremdes Vorhaben: verantwortet von „Zweite Person“, darf.aendern falsch');
 
-  // 3. Der Beitrag mit geänderter vision.md und Notiz.
+  // 3. Der alte Weg ist entfernt: 404, kein Beitrag, keine Fassung.
+  const kopfVorAlt = git(['-C', ablage, 'rev-parse', 'HEAD']).out;
+  const baumVorAlt = git(['-C', ablage, 'status', '--porcelain']).out;
   const resBeitrag = await posting('/board/beitrag', {
     vorhaben: 'von-p2',
     schritt: 'pruefen',
     notiz: NOTIZ,
     dateien: [{ name: 'vision.md', text: VISION_NEU }],
   });
-  const beitragAntwort = alsJson(resBeitrag, '/board/beitrag');
-  pruefe(beitragAntwort.ok === true, 'Die Antwort meldet kein ok');
-  const beitrag = beitragAntwort.beitrag;
-  pruefe(!!beitrag && !!beitrag.id, 'Die Antwort trägt keinen Beitrag');
-  pruefe(Object.keys(beitrag).sort().join(',')
-    === 'basis,dateien,entschieden,id,notiz,schritt,seit,von,vorhaben',
-  'Der Beitrag hat nicht die neun Felder: ' + Object.keys(beitrag).sort().join(', '));
-  pruefe(beitrag.id === beitrag.id.toLowerCase()
-    && /^[a-z0-9][a-z0-9-]*$/.test(beitrag.id),
-  'Die Beitrags-Kennung taugt nicht als Ordnername: ' + beitrag.id);
-  pruefe(beitrag.vorhaben === 'von-p2',
-    'Der Beitrag gehört zu „' + beitrag.vorhaben + '“');
-  pruefe(beitrag.schritt === 'pruefen',
-    'Der Beitrag steht an „' + beitrag.schritt + '“');
-  pruefe(beitrag.von === 'Thomas Heinrich',
-    'Der Beitrag nennt „' + beitrag.von + '“ als Beitragenden');
-  pruefe(!Number.isNaN(new Date(beitrag.seit).getTime()),
-    'Der Zeitpunkt fehlt oder ist kein Datum: ' + beitrag.seit);
-  pruefe(beitrag.basis === basisVorher,
-    'Die Basis ist „' + beitrag.basis + '“ statt „' + basisVorher + '“');
-  pruefe(beitrag.notiz === NOTIZ, 'Die Notiz wurde verändert');
-  pruefe(Array.isArray(beitrag.dateien) && beitrag.dateien.length === 1,
-    'Der Beitrag trägt nicht genau eine Datei: ' + JSON.stringify(beitrag.dateien));
-  pruefe(beitrag.dateien[0].name === 'vision.md',
-    'Die vorgeschlagene Datei heißt „' + beitrag.dateien[0].name + '“');
-  const dateiPfad = 'beitraege/von-p2/' + beitrag.id + '/vision.md';
-  pruefe(beitrag.dateien[0].datei === dateiPfad,
-    'Die vorgeschlagene Fassung liegt nicht unter ' + dateiPfad);
-  pruefe(beitrag.entschieden === null, 'Der Beitrag gilt schon als entschieden');
+  pruefe(resBeitrag.status === 404, 'POST /board/beitrag antwortet '
+    + resBeitrag.status + ' statt 404: ' + resBeitrag.text);
+  const resLesen = get('/board/beitrag?vorhaben=von-p2&beitrag=irgendwas');
+  pruefe(resLesen.status === 404, 'GET /board/beitrag antwortet '
+    + resLesen.status + ' statt 404');
+  const resEntscheid = await posting('/board/beitrag/entscheiden', {
+    beitrag: 'irgendwas', art: 'annehmen',
+  });
+  pruefe(resEntscheid.status === 404, 'POST /board/beitrag/entscheiden antwortet '
+    + resEntscheid.status + ' statt 404');
 
-  // 4. Die Dateien liegen in der Ablage; das Original ist byte-gleich.
-  const beitragJsonPfad = join(ablage, 'beitraege', 'von-p2', beitrag.id + '.json');
-  pruefe(existsSync(beitragJsonPfad), 'Die Beitragsdatei fehlt: ' + beitragJsonPfad);
-  const beitragJson = liesJson(beitragJsonPfad);
-  pruefe(JSON.stringify(beitragJson) === JSON.stringify(beitrag),
-    'Die Beitragsdatei weicht von der Antwort ab');
-  const vorschlagPfad = join(ablage, dateiPfad);
-  pruefe(existsSync(vorschlagPfad), 'Die vorgeschlagene Fassung fehlt: ' + vorschlagPfad);
-  pruefe(readFileSync(vorschlagPfad, 'utf8') === VISION_NEU,
-    'Die vorgeschlagene Fassung trägt nicht den neuen Text');
-  pruefe(readFileSync(vorschlagPfad, 'utf8').includes('Thomas Heinrich'),
-    'Die vorgeschlagene Fassung nennt Thomas Heinrich nicht');
+  // 4. Die fremden Dateien bleiben byte-gleich; es gibt keinen Beitragsordner
+  //    und keine Fassung.
+  pruefe(!existsSync(join(ablage, 'beitraege')),
+    'Der alte Weg hat einen beitraege/-Ordner angelegt');
   pruefe(Buffer.compare(visionVorher, readFileSync(join(fremdOrdner, 'vision.md'))) === 0,
-    'Die Originaldatei vision.md wurde geschrieben');
+    'Der alte Weg hat vision.md geschrieben');
   pruefe(Buffer.compare(vorhabenVorher, readFileSync(join(fremdOrdner, 'vorhaben.json'))) === 0,
-    'Die fremde vorhaben.json wurde geschrieben');
+    'Der alte Weg hat die fremde vorhaben.json geschrieben');
+  pruefe(git(['-C', ablage, 'rev-parse', 'HEAD']).out === kopfVorAlt,
+    'Der alte Weg hat eine Fassung angelegt');
+  pruefe(git(['-C', ablage, 'status', '--porcelain']).out === baumVorAlt,
+    'Der alte Weg hat den Arbeitsbaum verändert');
+  console.log('ok alter Beitragsweg: 404, kein beitraege-Ordner, fremdes Vorhaben unberührt');
 
-  // 5. Jeder Beitrag ist eine Fassung mit dem Beitragenden als Urheber.
-  const autor = git(['-C', ablage, 'log', '-1', '--format=%an']).out;
-  const nachricht = git(['-C', ablage, 'log', '-1', '--format=%s']).out;
-  const geaendert = git(['-C', ablage, 'show', '--name-only', '--format=', 'HEAD']).out;
-  pruefe(autor === 'Thomas Heinrich',
-    'Die Fassung nennt „' + autor + '“ statt Thomas Heinrich');
-  pruefe(/Beitrag/.test(nachricht),
-    'Die Fassung heißt „' + nachricht + '“ statt einer Beitrags-Fassung');
-  pruefe(geaendert.includes('beitraege/von-p2/' + beitrag.id),
-    'Die Fassung enthält den Beitrag nicht: ' + geaendert);
-  pruefe(!geaendert.includes('vorgaenge/von-p2'),
-    'Die Fassung hat das fremde Vorhaben angefasst: ' + geaendert);
-  pruefe(git(['-C', ablage, 'status', '--porcelain']).out === '',
-    'Nach dem Beitrag ist der Arbeitsbaum nicht ruhig: '
-      + git(['-C', ablage, 'status', '--porcelain']).out);
-  console.log('ok Beitrag: JSON mit allen Feldern, Fassung unter ' + dateiPfad
-    + ', Urheber „' + autor + '“');
-
-  // 6. /board/data zeigt ihn an Vorhaben und Station; das Original bleibt.
+  // 5. /board/data bleibt lesbar; alte Beiträge gibt es hier keine, das Feld
+  //    bleibt aber Teil der Antwort.
   const datenNachher = alsJson(get('/board/data'), '/board/data');
-  pruefe(datenNachher.beitraege.length === 1,
-    '/board/data zeigt ' + datenNachher.beitraege.length + ' Beiträge statt 1');
-  const gezeigt = datenNachher.beitraege[0];
-  pruefe(gezeigt.id === beitrag.id, 'Der falsche Beitrag steht in /board/data');
-  pruefe(gezeigt.vorhaben === 'von-p2'
-    && gezeigt.vorhabenName === 'Von der zweiten Person',
-  'Der Ort des Beitrags fehlt: ' + JSON.stringify({
-    vorhaben: gezeigt.vorhaben, name: gezeigt.vorhabenName,
-  }));
-  pruefe(gezeigt.schritt === 'pruefen' && gezeigt.station === 'Prüfen',
-    'Die Station des Beitrags fehlt: ' + JSON.stringify({
-      schritt: gezeigt.schritt, station: gezeigt.station,
-    }));
-  pruefe(gezeigt.von === 'Thomas Heinrich', 'Der Name des Beitragenden fehlt');
-  pruefe(gezeigt.seit === beitrag.seit, 'Der Zeitpunkt weicht ab');
-  pruefe(gezeigt.notiz === NOTIZ, 'Die Notiz fehlt in /board/data');
-  pruefe(JSON.stringify(gezeigt.dateien) === JSON.stringify(['vision.md']),
-    'Die Namen der vorgeschlagenen Dateien fehlen: ' + JSON.stringify(gezeigt.dateien));
-  pruefe(gezeigt.entschieden === null, 'Der Beitrag gilt in /board/data als entschieden');
-  console.log('ok /board/data: Beitrag an Vorhaben und Station, von Thomas Heinrich, '
-    + 'Notiz und vision.md');
-
-  // 7. Öffnen: Notiz und vorgeschlagene Fassung lesen.
-  const geoeffnet = alsJson(get('/board/beitrag?vorhaben=von-p2&beitrag='
-    + encodeURIComponent(beitrag.id)), 'GET /board/beitrag');
-  pruefe(geoeffnet.beitrag.id === beitrag.id
-    && geoeffnet.beitrag.notiz === NOTIZ,
-  'Die Notiz des Beitrags fehlt beim Öffnen');
-  pruefe(geoeffnet.beitrag.station === 'Prüfen'
-    && geoeffnet.beitrag.vorhabenName === 'Von der zweiten Person',
-  'Ort oder Vorhaben fehlen beim Öffnen');
-  pruefe(Array.isArray(geoeffnet.dateien) && geoeffnet.dateien.length === 1,
-    'Beim Öffnen fehlt die vorgeschlagene Fassung');
-  pruefe(geoeffnet.dateien[0].name === 'vision.md'
-    && geoeffnet.dateien[0].exists === true
-    && geoeffnet.dateien[0].text === VISION_NEU,
-  'Beim Öffnen ist die vorgeschlagene Fassung nicht lesbar');
-  console.log('ok Öffnen: Notiz und vorgeschlagene vision.md lesbar');
-
-  // 8. Ein Beitrag nur mit Notiz ist gültig; ein ganz leerer wird abgewiesen.
-  const resNotiz = await posting('/board/beitrag', {
-    vorhaben: 'von-p2',
-    schritt: 'pruefen',
-    notiz: 'Nur eine Notiz, keine Datei.',
-    dateien: [],
-  });
-  const nurNotiz = alsJson(resNotiz, '/board/beitrag (nur Notiz)').beitrag;
-  pruefe(nurNotiz.notiz === 'Nur eine Notiz, keine Datei.'
-    && Array.isArray(nurNotiz.dateien) && nurNotiz.dateien.length === 0,
-  'Der Beitrag nur mit Notiz wurde nicht richtig abgelegt');
-  pruefe(existsSync(join(ablage, 'beitraege', 'von-p2', nurNotiz.id + '.json')),
-    'Die Beitragsdatei der Notiz fehlt');
-  pruefe(!existsSync(join(ablage, 'beitraege', 'von-p2', nurNotiz.id)),
-    'Ein Beitrag nur mit Notiz hat einen Dateiordner bekommen');
-  const anzahlVorLeer = beitragsDateien().length;
-  const kopfVorLeer = git(['-C', ablage, 'rev-parse', 'HEAD']).out;
-  const resLeer = await posting('/board/beitrag', {
-    vorhaben: 'von-p2',
-    schritt: 'pruefen',
-    notiz: '   ',
-    dateien: [],
-  });
-  pruefe(resLeer.status === 400,
-    'Ein leerer Beitrag antwortet ' + resLeer.status + ' statt 400: ' + resLeer.text);
-  pruefe(beitragsDateien().length === anzahlVorLeer,
-    'Der leere Beitrag hat eine Datei angelegt');
-  pruefe(git(['-C', ablage, 'rev-parse', 'HEAD']).out === kopfVorLeer,
-    'Der leere Beitrag hat eine Fassung angelegt');
-  console.log('ok Notiz ohne Datei angenommen, leerer Beitrag mit 400 abgewiesen');
+  pruefe(Array.isArray(datenNachher.beitraege) && datenNachher.beitraege.length === 0,
+    '/board/data trägt nach dem alten Weg ' + (datenNachher.beitraege || []).length
+      + ' Beiträge');
+  console.log('ok /board/data: leere Beitragsliste bleibt lesbar');
 
   // 9. Die Seite: Bearbeiten am fremden Vorhaben führt zum Beitrag, nicht zum
   //    Schreiben in die Originaldatei (Quelltext, kein Browserbild).
@@ -410,9 +319,11 @@ try {
     'Der Leser fragt beim fremden Vorhaben keine Notiz ab');
   pruefe(client.includes('function beitragSpeichern'),
     'Der Leser hat kein Speichern als Beitrag');
-  pruefe(client.includes("poste('/board/beitrag'"),
-    'Der Beitrag geht nicht an /board/beitrag');
-  pruefe(client.includes("'Beitrag von '"),
+  pruefe(client.includes("fetch('/board/github/beitrag'"),
+    'Der Beitrag geht nicht an /board/github/beitrag');
+  pruefe(!client.includes("poste('/board/beitrag'"),
+    'Der Leser ruft noch den alten Weg /board/beitrag auf');
+  pruefe(client.includes("uebersetze('Beitrag von {0}"),
     'Die Seite zeigt den Namen des Beitragenden nicht');
   pruefe(client.includes('function beitragOeffnen'),
     'Die Seite kann einen Beitrag nicht öffnen');
