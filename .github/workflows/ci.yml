@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Syntax
+        run: node --check client.js && node --check index.js
+      # 34 Prüfungen lesen die echte Werkstatt: die alte Ablage unter
+      # /workspace/projekte/board und das Hauptboard unter
+      # /workspace/projekte/board-repos. Ein fremder Klon hat beides nicht.
+      # Sie laufen in der Werkstatt und in der Abnahme; die CI führt die 50
+      # selbstständigen Prüfungen aus. Eine Suite mit eigenen Fixtures für
+      # alle Prüfungen ist offen (Schritt 71b).
+      - name: Prüfungen
+        run: >-
+          node --test $(ls test/*.mjs | grep -vE
+          '/(markt(25|26|27|42|45|46|48)|schritt(03|0[5-9]|1[0-9]|2[0-9]|30))\.mjs$')

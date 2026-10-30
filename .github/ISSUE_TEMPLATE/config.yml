@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Dokumentation
+    url: https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/tree/main/docs
+    about: Architektur, Entwicklung, Routen, Datenformate und Fehlersuche
+  - name: Sicherheitslücke
+    url: https://github.com/DeepCollaboration/DeepSeekCollaborationBoard-Plugin/security/policy
+    about: Bitte nicht als offenes Issue melden

@@ -1,3 +1,5 @@
 node_modules/
 board.config.json
 *.tmp
+*.bak
+*.orig
